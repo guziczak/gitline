@@ -2449,6 +2449,7 @@ class BranchRef:
     name: str
     ref: str
     oid: str = ""
+    remote: str = ""  # Set for a server branch that has no local branch yet.
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3222,14 +3223,25 @@ class GitBackend:
         if upstream:
             counts = self.run(repo, ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"]).split()
             ahead, behind = int(counts[0]), int(counts[1])
-        branch_data = self.run(repo, ["for-each-ref", "--sort=refname", "--format=%(refname)%00%(objectname)", "refs/heads/"])
-        branches = []
+        remotes = self.run(repo, ["remote"]).splitlines()
+        branch_data = self.run(repo, ["for-each-ref", "--sort=refname", "--format=%(refname)%00%(objectname)%00%(symref)",
+                                      "refs/heads/", "refs/remotes/"])
+        branches, server_branches = [], []
         for entry in branch_data.splitlines():
-            full_ref, oid = entry.split("\0", 1)
-            branches.append(BranchRef(full_ref.removeprefix("refs/heads/"), full_ref, oid))
+            full_ref, oid, symbolic = entry.split("\0", 2)
+            if full_ref.startswith("refs/heads/"):
+                branches.append(BranchRef(full_ref.removeprefix("refs/heads/"), full_ref, oid))
+                continue
+            # origin/HEAD only points at another branch. The longest match wins for a remote named like "team/fork".
+            name = full_ref.removeprefix("refs/remotes/")
+            remote = max((item for item in remotes if name.startswith(item + "/")), key=len, default="")
+            if remote and not symbolic:
+                server_branches.append(BranchRef(name, full_ref, oid, remote))
         if not has_head and head_ref and all(item.ref != head_ref for item in branches):
             branches.insert(0, BranchRef(branch, head_ref))
-        remotes = self.run(repo, ["remote"]).splitlines()
+        # A server branch is offered until a local branch of the same name exists.
+        local_names = {item.name for item in branches}
+        branches += [item for item in server_branches if item.name.removeprefix(item.remote + "/") not in local_names]
         commits = []
         if has_head:
             fields = self.run(repo, ["log", "-z", "-150", "--format=%H%x00%h%x00%s%x00%an%x00%aI%x00%D"]).split("\0")
@@ -3559,6 +3571,10 @@ class GitBackend:
         return name
 
     def switch_branch(self, repo, name):
+        if isinstance(name, BranchRef) and name.remote:
+            # Choosing a server branch starts the local branch that tracks it.
+            local = self._branch_name(repo, name.name.removeprefix(name.remote + "/"))
+            return self.run(repo, ["switch", "-c", local, "--track", name.ref])
         name = self._branch_name(repo, name)
         return self.run(repo, ["switch", "--no-guess", "--", name])
 
@@ -5745,6 +5761,22 @@ def self_test_backend():
                 len(hook_arguments) == 2 and hook_arguments[0] == "origin"
                 and Path(hook_arguments[1]).resolve() == bare.resolve())
         checked("push establishes upstream", backend.snapshot(repo).upstream == "origin/main")
+        backend.run(bare, ["update-ref", "refs/heads/server/only", backend.snapshot(repo).head_oid])
+        backend.fetch(repo)
+        listed = backend.snapshot(repo).branches
+        server_only = next(item for item in listed if item.ref == "refs/remotes/origin/server/only")
+        checked("server branches without a local branch are listed once, after the local ones",
+                server_only.name == "origin/server/only" and server_only.remote == "origin" and listed[-1] == server_only
+                and all(item.ref != "refs/remotes/origin/main" for item in listed))
+        backend.switch_branch(repo, server_only)
+        tracking = backend.snapshot(repo)
+        checked("choosing a server branch starts a local branch that tracks it",
+                tracking.branch == "server/only" and tracking.upstream == "origin/server/only"
+                and all(not item.remote for item in tracking.branches))
+        backend.switch_branch(repo, "main")
+        backend.run(repo, ["branch", "-D", "server/only"])
+        backend.run(bare, ["update-ref", "-d", "refs/heads/server/only"])
+        backend.fetch(repo)
         backend.run(repo, ["tag", "main"])
         collision_state = backend.snapshot(repo)
         main_ref = next(item for item in collision_state.branches if item.ref == "refs/heads/main")
@@ -9692,6 +9724,7 @@ class CloneDialog(QDialog):
         self._cloned_request = None
         self.selected_project = None
         self._suggested_target = ''
+        self._chosen_parent = None
         layout = QVBoxLayout(self); layout.setContentsMargins(28, 28, 28, 28); layout.setSpacing(14)
         layout.addWidget(ui_label('Twoje repozytorium. Tutaj.', 'title'))
         layout.addWidget(ui_label('Projekty z Twoich kont pobierają się automatycznie. Wybierz jeden lub wklej adres.', 'muted', True))
@@ -9738,13 +9771,16 @@ class CloneDialog(QDialog):
         dialog = QFileDialog(self, 'Wybierz folder nadrzędny')
         dialog.setFileMode(QFileDialog.FileMode.Directory)
         dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
-        def selected(folder):
-            name = self.url.text().strip().rstrip('/').rsplit('/', 1)[-1].removesuffix('.git') or 'projekt'
-            self._suggested_target = str(Path(folder) / name)
-            self.target.setText(self._suggested_target)
-        dialog.fileSelected.connect(selected)
+        dialog.fileSelected.connect(self.use_parent)
         dialog.finished.connect(dialog.deleteLater)
         dialog.open()
+
+    def use_parent(self, folder):
+        """A parent folder chosen here replaces the per-service default for later selections."""
+        self._chosen_parent = Path(folder)
+        name = self.url.text().strip().rstrip('/').rsplit('/', 1)[-1].removesuffix('.git') or 'projekt'
+        self._suggested_target = str(self._chosen_parent / name)
+        self.target.setText(self._suggested_target)
 
     def choose_project(self, project):
         if not project:
@@ -9763,7 +9799,9 @@ class CloneDialog(QDialog):
         if not self.target.text().strip() or self.target.text() == self._suggested_target:
             name = project.get('name') or project.get('full_name', '').rsplit('/', 1)[-1]
             name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '-', name).strip(' .') or 'projekt'
-            parent = Path(self._suggested_target).parent if self._suggested_target else Path.home() / 'Documents' / 'GitHub'
+            # Each service has its own default folder: GitLab projects do not belong under "GitHub".
+            service = 'GitLab' if project.get('provider') == 'gitlab' else 'GitHub'
+            parent = self._chosen_parent or Path.home() / 'Documents' / service
             self._suggested_target = str(parent / name)
             self.target.setText(self._suggested_target)
         self.status.setText(f"Konto do klonowania: @{project['account_username']} · {project['host']}" if available else
@@ -12360,6 +12398,9 @@ class MainWindow(FramelessWindow):
             self.branches.blockSignals(True); self.branches.clear()
             for branch in state.branches:
                 self.branches.addItem(getattr(branch, 'name', str(branch)), branch)
+                if getattr(branch, 'remote', ''):
+                    self.branches.setItemData(self.branches.count() - 1, 'Gałąź na serwerze. Wybranie jej utworzy lokalną gałąź, '
+                                              'która ją śledzi.', Qt.ItemDataRole.ToolTipRole)
             if self.branches.findText(state.branch) < 0: self.branches.insertItem(0, state.branch)
             self.branches.setCurrentText(state.branch); self.branches.blockSignals(False)
             self.branches.setToolTip(state.branch)
@@ -17640,6 +17681,16 @@ def ui_self_test():
             window.backend.snapshot_release.clear()
             window.refresh(silent=True); pump(window.backend.snapshot_started.is_set)
             dialog = window.clone_repo()
+            suggested = dict(name='suggested', clone_url='https://example.test/team/suggested.git', account_id='bob',
+                             account_username='bob', host='https://example.test')
+            for provider, folder in (('gitlab', 'GitLab'), ('github', 'GitHub')):
+                dialog.choose_project(dict(suggested, provider=provider))
+                check(Path(dialog.target.text()) == Path.home() / 'Documents' / folder / 'suggested',
+                      provider + ' projects default to a folder named after their own service')
+            dialog.use_parent(str(Path(directory) / 'chosen'))
+            dialog.choose_project(dict(suggested, provider='gitlab'))
+            check(Path(dialog.target.text()) == Path(directory) / 'chosen' / 'suggested',
+                  'a parent folder chosen by the user outlives the next project selection')
             target = str(Path(directory) / 'clone')
             dialog.url.setText('https://example.test/team/project.git'); dialog.target.setText(target)
             dialog.account.setCurrentIndex(dialog.account.findData('bob'))

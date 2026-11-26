@@ -109,7 +109,7 @@ Konta GitHub, GitLab i firmowych serwerów łączysz raz — tokeny trafiają do
 | Obszar | Co dostajesz |
 | :--- | :--- |
 | **Codzienna praca** | zaznaczanie plików do commita, filtr, diff z numerami linii i zawijaniem, wyszukiwanie w diffie, commit z tytułem i opisem |
-| **Gałęzie i serwer** | przełączanie i tworzenie gałęzi, `Fetch` / `Pull` / `Push` z licznikiem ahead/behind, podgląd celu przed wysłaniem, zmiana serwera zdalnego |
+| **Gałęzie i serwer** | przełączanie i tworzenie gałęzi (także tych, które są na razie tylko na serwerze), `Fetch` / `Pull` / `Push` z licznikiem ahead/behind, podgląd celu przed wysłaniem, zmiana serwera zdalnego |
 | **Historia** | zmiana opisu, squash wielu commitów, cofnięcie ostatniego commita, revert z odzyskiwaniem, plan force‑push z jawnym potwierdzeniem |
 | **Schowek** | odłożenie i przywrócenie zmian (stash) bez opuszczania okna |
 | **Konta** | GitHub, GitLab i własne serwery HTTPS; automatyczny dobór konta dla repozytorium, ręczny wybór pamiętany per repozytorium, katalog projektów do sklonowania |
