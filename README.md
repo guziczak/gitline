@@ -36,7 +36,7 @@ Nie modyfikuje systemu: nie dotyka `PATH`, globalnej konfiguracji Gita ani cudzy
 
 ## Szybki start
 
-**Wymagania:** Windows albo macOS 13+ (wsparcie wstępne), 64‑bitowy CPython 3.10 – 3.14 oraz internet przy pierwszym uruchomieniu.
+**Wymagania:** Windows albo macOS 14+ (wsparcie wstępne), 64‑bitowy CPython 3.10 – 3.15 oraz internet przy pierwszym uruchomieniu.
 
 ```powershell
 python gitline.py                    # pierwszy start przygotuje wszystko sam

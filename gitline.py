@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """Gitline — a single-file desktop Git client.
 
-Share only gitline.py. Windows (or macOS 13+, early support) and an installed
-64-bit CPython 3.10–3.14 are required: ``python gitline.py``. The first launch
+Share only gitline.py. Windows (or macOS 14+, early support) and an installed
+64-bit CPython 3.10–3.15 are required: ``python gitline.py``. The first launch
 needs internet and automatically prepares its private environment; on Windows
 x64 it also downloads a verified private copy of Git if Git is missing, while
 macOS uses the Git of Apple's command line tools or Homebrew. No manual pip
@@ -200,7 +200,7 @@ def _set_config_section(name: str, value) -> None:
                 with contextlib.suppress(FileNotFoundError): temporary.unlink()
 
 _DEPENDENCIES = {
-    "PySide6-Essentials": "6.11.2", "shiboken6": "6.11.2", "keyring": "25.7.0",
+    "PySide6-Essentials": "6.12.0", "shiboken6": "6.12.0", "keyring": "25.7.0",
     "jaraco.classes": "3.4.0", "jaraco.context": "6.1.2",
     "jaraco.functools": "4.6.0", "more-itertools": "11.1.0",
     "pywin32-ctypes": "0.2.3",
@@ -211,11 +211,11 @@ if sys.version_info < (3, 12):
 # Release-specific wheel hashes are generated from the publishers' PyPI metadata.
 _LOCKED_WHEELS = {
     "PySide6-Essentials": (
-        "77795c145202e65a78d88f7cd409d186e3ba23d159bdb3ba2dcd159ae5e5f0d9",
-        "aaf9f25f0f324874085fa5b26a610318db8a8e243cf85bb3e5400595191c7778",
-        "c8a29def77032773a30879f7f24415b5395ad08592d147c170824ef4c735dfc1",
-        "d3ec6e1885c46e57f16364f38ea8040ffc5dc0b18341058f608fede3ba930567",
-        "fadd75c5c20800d64dd0a586ea8cb337c5e630aa2246df0e5105738afa46e02c",
+        "0867b709a724db28b161227c7d6ecb5ed10cc09226a53542417ac6dee1308239",
+        "08c5841063fc1df69b7fa1ee405f539e66576a83fc48004be3e2c5e35ccbfa69",
+        "16f4b5e41daf49235ae048458243da9efe5f3d8040f9cc5aa454ce69893d3bd9",
+        "c76aa689989bf9bb9b45535e0a81c6733294df720b0eed1308fa30d2606b98cc",
+        "c9a95102aa23c1f86516a30d5a9be37552d324eee7e567eb7508973f1218cb42",
     ),
     "backports.tarfile": (
         "77e284d754527b01fb1e6fa8a1afe577858ebe4e9dad8919e34c862cb399bc34",
@@ -242,11 +242,11 @@ _LOCKED_WHEELS = {
         "8a1513379d709975552d202d942d9837758905c8d01eb82b8bcc30918929e7b8",
     ),
     "shiboken6": (
-        "4bbbd6fa4d7cff5ec5e12bc4c10e1d845fa30c89457ecb13cc64f7bddb77f6f9",
-        "53659683b1f7a08e9f87eff9b1065f1ceb7110cd7a4bc09fdf5efe43d286604d",
-        "6ab0eba1c904455df621f9a6df3ca2bb896bab8670572d2bc4e37804ae91f19a",
-        "7a7a0a72a9ed26c9bf77d42246b1c736486befb8f31aa2fb29957ea4cdd1c1c2",
-        "97c49432488df958f0308736f3d15b6915d8826fc380af17bb4b9ec5c4a5e81b",
+        "3bde565bb0890044b5c7f63808adddede5abc241e9395a2bfed61919884d6240",
+        "47105e05baf57d35453e07d240bbe59cb4b8d9565377ea5134ff9fb37d4f5c02",
+        "a1906cb8116869178c64b6bab52623bbc8b4ceed7b30bfc3c9aa0f6e67f6438e",
+        "da382e68f0815b31b6dc2bce11a465b148c4f42c37b91546a361de1576567d10",
+        "ff72a72b3277b418902d562b987b33a6f6818bed9fe40a49d634d09bc67f620e",
     ),
     "zipp": (
         "25ad4e16390cd314347dd8f1de67a2ac538ae658ed4ab9db16029c07c188e97f",
@@ -2122,7 +2122,7 @@ def bootstrap(_source=None, *, _retained=False) -> None:
             f"Konfiguracja: {_config_path()}\n"
             f"Środowisko tej kopii: {_RUNTIME_DIR}\n"
             f"Dzienniki, prywatny Git i ikony: {APP_DATA}\n"
-            "Wymagany Windows albo macOS 13+ (wsparcie wstępne), Python 3.10–3.14 (64-bit) i internet przy pierwszym uruchomieniu.\n"
+            "Wymagany Windows albo macOS 14+ (wsparcie wstępne), Python 3.10–3.15 (64-bit) i internet przy pierwszym uruchomieniu.\n"
             "Biblioteki i brakujący Git na Windows x64 są przygotowywane automatycznie.\n"
             "Na macOS potrzebny jest Git z narzędzi wiersza poleceń Apple lub z Homebrew.\n"
             "Biblioteki: publiczne PyPI lub własne Artifactory — wybór przed instalacją.\n"
@@ -2136,8 +2136,8 @@ def bootstrap(_source=None, *, _retained=False) -> None:
         _bootstrap_error(f'Ta wersja {APP_NAME} działa tylko w Windows i macOS. Nie przygotowano środowiska.')
         raise SystemExit(1)
 
-    if not (3, 10) <= sys.version_info[:2] < (3, 15):
-        _bootstrap_error(f"Ta wersja {APP_NAME} wymaga Pythona 3.10–3.14.")
+    if not (3, 10) <= sys.version_info[:2] < (3, 16):
+        _bootstrap_error(f"Ta wersja {APP_NAME} wymaga Pythona 3.10–3.15.")
         raise SystemExit(1)
 
     if sys.maxsize <= 2**32:
@@ -9780,9 +9780,10 @@ class CloneDialog(QDialog):
 
 
 _TECHNOLOGY_LICENSES = {
-    # Publisher metadata checked for these exact releases on 2026-09-09.
-    'PySide6-Essentials': ('6.11.2', 'LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only', 'Powiązania Pythona z Qt i pakiet bibliotek natywnych.', 'Windows'),
-    'shiboken6': ('6.11.2', 'LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only', 'Warstwa łącząca obiekty Pythona i C++ w PySide6.', 'Windows'),
+    # Publisher metadata checked for these exact releases on 2026-09-09
+    # (PySide6-Essentials and shiboken6 6.12.0 on 2026-11-26).
+    'PySide6-Essentials': ('6.12.0', 'LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only', 'Powiązania Pythona z Qt i pakiet bibliotek natywnych.', 'Windows'),
+    'shiboken6': ('6.12.0', 'LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only', 'Warstwa łącząca obiekty Pythona i C++ w PySide6.', 'Windows'),
     'keyring': ('25.7.0', 'MIT', 'Dostęp do systemowego magazynu poświadczeń.', 'Windows'),
     'jaraco.classes': ('3.4.0', 'MIT', 'Narzędzia klas używane przez keyring.', 'Windows'),
     'jaraco.context': ('6.1.2', 'MIT', 'Zarządzanie kontekstami i zasobami w zależnościach.', 'Windows'),
@@ -14038,7 +14039,7 @@ class MainWindow(FramelessWindow):
         heading.addWidget(wordmark); heading.addWidget(ui_label(f'Klient Git · {APP_VERSION}', 'muted'))
         brand.addLayout(heading, 1); layout.addLayout(brand)
         info = QPlainTextEdit(); info.setReadOnly(True)
-        info.setPlainText('gitline.py — jeden plik, wymagany Windows i Python 3.10–3.14 (64-bit).\n'
+        info.setPlainText('gitline.py — jeden plik, wymagany Windows i Python 3.10–3.15 (64-bit).\n'
             'Pierwszy start wymaga internetu. Biblioteki i brakujący Git na Windows x64 są przygotowywane automatycznie.\n\n'
             'Przed instalacją wybierzesz publiczne PyPI lub wewnętrzne Artifactory. '
             'Polecenie python gitline.py --setup otwiera ponownie wybór źródła pakietów.\n\n'
@@ -15095,7 +15096,7 @@ def bootstrap_self_test():
     backports = {'importlib_metadata', 'zipp', 'backports.tarfile'}
     check(set(_LOCKED_WHEELS) == set(_TECHNOLOGY_LICENSES) == base | backports,
           'wheel hashes and declared license catalog contain only the Windows package set')
-    for minor in range(10, 15):
+    for minor in range(10, 16):
         namespace = {'sys': SimpleNamespace(version_info=(3, minor))}
         exec(dependency_code, namespace)
         expected = base | backports if minor < 12 else base
