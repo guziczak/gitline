@@ -194,6 +194,7 @@ bootstrap  →  czysty backend Git i modele  →  konta i credential helper  →
 | :--- | :--- |
 | Qt / PySide6 / Shiboken — © The Qt Company Ltd. i współtwórcy | [LGPLv3](https://www.gnu.org/licenses/lgpl-3.0.html) · [Qt for Python — licencje](https://doc.qt.io/qtforpython-6/licenses.html) · [zobowiązania LGPL](https://www.qt.io/development/open-source-lgpl-obligations) |
 | keyring — © współtwórcy | [MIT](https://github.com/jaraco/keyring/blob/main/LICENSE) |
+| truststore — © współtwórcy | [MIT](https://github.com/sethmlarson/truststore/blob/main/LICENSE) |
 | Git — osobny plik wykonywalny | [GPLv2](https://git-scm.com/about/free-and-open-source) |
 
 Aplikacja ładuje dynamicznie moduły Qt Core, Gui i Widgets na warunkach LGPLv3. Dystrybucja komercyjna musi zachować noty licencyjne, zapewnić dostęp do źródeł bibliotek i umożliwić użytkownikom ich podmianę. Pojedynczy plik źródłowy nie znosi tych zobowiązań — teksty licencji zależności pozostają zainstalowane w wymienialnym środowisku uruchomieniowym, a ich pełną listę pokazuje okno *Technologie i licencje*.

@@ -47,6 +47,8 @@ these obligations. Review the actual licenses for your distribution:
   https://www.gnu.org/licenses/lgpl-3.0.html
 keyring is copyright its contributors and distributed under the MIT license:
   https://github.com/jaraco/keyring/blob/main/LICENSE
+truststore is copyright its contributors and distributed under the MIT license:
+  https://github.com/sethmlarson/truststore/blob/main/LICENSE
 Git is a separate executable distributed under GPLv2:
   https://git-scm.com/about/free-and-open-source
 
@@ -203,7 +205,7 @@ _DEPENDENCIES = {
     "PySide6-Essentials": "6.12.0", "shiboken6": "6.12.0", "keyring": "25.7.0",
     "jaraco.classes": "3.4.0", "jaraco.context": "6.1.2",
     "jaraco.functools": "4.6.0", "more-itertools": "11.1.0",
-    "pywin32-ctypes": "0.2.3",
+    "pywin32-ctypes": "0.2.3", "truststore": "0.10.5",
 }
 if sys.version_info < (3, 12):
     _DEPENDENCIES.update({"importlib_metadata": "9.0.1", "zipp": "4.1.0",
@@ -247,6 +249,9 @@ _LOCKED_WHEELS = {
         "a1906cb8116869178c64b6bab52623bbc8b4ceed7b30bfc3c9aa0f6e67f6438e",
         "da382e68f0815b31b6dc2bce11a465b148c4f42c37b91546a361de1576567d10",
         "ff72a72b3277b418902d562b987b33a6f6818bed9fe40a49d634d09bc67f620e",
+    ),
+    "truststore": (
+        "9aaaedaefaf06d8b206278cf8b5012bc897f485a874503501e12d776df78951c",
     ),
     "zipp": (
         "25ad4e16390cd314347dd8f1de67a2ac538ae658ed4ab9db16029c07c188e97f",
@@ -5932,6 +5937,8 @@ from pathlib import Path as AuthPath
 import re as auth_re
 import shlex as auth_shlex
 import shutil as auth_shutil
+import socket as auth_socket
+import ssl as auth_ssl
 import subprocess as auth_subprocess
 import sys as auth_sys
 auth_sys.dont_write_bytecode = True
@@ -5992,6 +5999,13 @@ class AuthNoRedirect(auth_urlrequest.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         # Never forward a token to another origin, even if a server redirects.
         raise AuthError("Serwer przekierował API. Wpisz jego końcowy adres HTTPS i spróbuj ponownie.")
+
+
+def auth_tls_context():
+    """Verify servers as the operating system does, including an organization's own certificate authority."""
+    import truststore
+    # Python's own OpenSSL ignores the macOS keychain. One context per request keeps threads independent.
+    return truststore.SSLContext(auth_ssl.PROTOCOL_TLS_CLIENT)
 
 
 class AccountStore:
@@ -6240,7 +6254,7 @@ class AccountStore:
             headers["PRIVATE-TOKEN"] = token
         request = auth_urlrequest.Request(base + endpoint, headers=headers)
         try:
-            opener = auth_urlrequest.build_opener(AuthNoRedirect())
+            opener = auth_urlrequest.build_opener(AuthNoRedirect(), auth_urlrequest.HTTPSHandler(context=auth_tls_context()))
             # Socket waits are short for a cancellable catalog/login read. DNS
             # resolution remains OS-owned and may exceed this socket timeout.
             timeout = 3 if _task_cancel_event() is not None else 25
@@ -6269,8 +6283,17 @@ class AccountStore:
             if error.code == 404:
                 raise AuthError("Nie znaleziono API. Sprawdź adres serwera i wybranego dostawcę.") from None
             raise AuthError("Serwer zwrócił błąd HTTP " + str(error.code) + ". Spróbuj ponownie później.") from None
-        except (auth_urlerror.URLError, TimeoutError, OSError):
+        except (auth_urlerror.URLError, TimeoutError, OSError) as error:
             _check_task_cancelled()
+            # urllib wraps the socket or TLS failure; name the cause the user can act on.
+            causes = (error, getattr(error, 'reason', None))
+            if any(isinstance(cause, auth_ssl.SSLCertVerificationError) for cause in causes):
+                raise AuthError("Ten komputer nie ufa certyfikatowi HTTPS tego serwera. Jeśli to serwer firmowy, dodaj "
+                                "certyfikat urzędu (CA) organizacji do systemowego magazynu certyfikatów.") from None
+            if any(isinstance(cause, auth_socket.gaierror) for cause in causes):
+                raise AuthError("Nie znaleziono serwera o tym adresie. Sprawdź adres oraz połączenie z siecią lub VPN.") from None
+            if any(isinstance(cause, TimeoutError) for cause in causes):
+                raise AuthError("Serwer nie odpowiedział na czas. Sprawdź połączenie z siecią i spróbuj ponownie.") from None
             raise AuthError("Nie można połączyć się z serwerem. Sprawdź internet, adres oraz certyfikat HTTPS.") from None
         except (ValueError, UnicodeError):
             raise AuthError("Serwer zwrócił niepoprawną odpowiedź API.") from None
@@ -7223,6 +7246,22 @@ def cancellable_reads_self_test():
             except AuthError as error:
                 check('zbyt duża' in str(error) and response.closed, 'bounded HTTP reading retains the response size limit')
             else: raise AssertionError('oversized HTTP response should be rejected')
+        import truststore
+        with mock.patch.object(auth_urlrequest, 'build_opener', return_value=Opener(Response(b'[]'))), \
+                mock.patch.object(auth_urlrequest, 'HTTPSHandler') as https:
+            store._request('github', 'https://github.com', '/user/repos', 'synthetic-token')
+        check(isinstance(https.call_args.kwargs['context'], truststore.SSLContext),
+              'API requests verify servers through the operating system trust store')
+        for failure, phrase in ((auth_ssl.SSLCertVerificationError(1, 'synthetic untrusted issuer'), 'nie ufa certyfikatowi'),
+                                (auth_socket.gaierror(8, 'synthetic unknown host'), 'Nie znaleziono serwera'),
+                                (TimeoutError('synthetic stalled socket'), 'nie odpowiedział na czas'),
+                                (ConnectionRefusedError('synthetic refusal'), 'Nie można połączyć się')):
+            class FailingOpener:
+                def open(self, request, timeout): raise auth_urlerror.URLError(failure)
+            with mock.patch.object(auth_urlrequest, 'build_opener', return_value=FailingOpener()):
+                try: store._request('gitlab', 'https://gitlab.example.test', '/user', 'synthetic-token')
+                except AuthError as error: check(phrase in str(error), 'a failed API connection names its cause: ' + phrase)
+                else: raise AssertionError('a failed API connection should be reported')
 
         account = dict(id='synthetic', host='https://github.com', provider='github', username='synthetic',
                        auth_kind='gcm', gcm_namespace='synthetic', generation='synthetic')
@@ -8189,6 +8228,24 @@ def ui_icon(name, color='#a6aec4', size=20):
         for y, x in ((6, 8), (12, 16), (18, 10)):
             p.drawLine(3, y, 21, y); p.setBrush(QColor('#171a23'))
             p.drawEllipse(QPointF(x, y), 2.3, 2.3)
+    p.end()
+    return QIcon(pixmap)
+
+
+def _dock_icon():
+    """A complete macOS Dock tile; a script otherwise shows its interpreter's icon."""
+    pixmap = QPixmap(1024, 1024)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pixmap)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    # Apple's icon grid: an 824-point rounded tile centred on a 1024-point canvas.
+    tile = QRectF(100, 100, 824, 824)
+    shade = QLinearGradient(tile.topLeft(), tile.bottomLeft())
+    shade.setColorAt(0, QColor('#262838')); shade.setColorAt(1, QColor('#101218'))
+    p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(shade))
+    p.drawRoundedRect(tile, 185, 185)
+    p.translate(512, 512); p.scale(27, 27); p.translate(-12, -12)
+    _paint_logo(p)
     p.end()
     return QIcon(pixmap)
 
@@ -9781,7 +9838,7 @@ class CloneDialog(QDialog):
 
 _TECHNOLOGY_LICENSES = {
     # Publisher metadata checked for these exact releases on 2026-09-09
-    # (PySide6-Essentials and shiboken6 6.12.0 on 2026-11-26).
+    # (PySide6-Essentials and shiboken6 6.12.0 and truststore 0.10.5 on 2026-11-26).
     'PySide6-Essentials': ('6.12.0', 'LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only', 'Powiązania Pythona z Qt i pakiet bibliotek natywnych.', 'Windows'),
     'shiboken6': ('6.12.0', 'LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only', 'Warstwa łącząca obiekty Pythona i C++ w PySide6.', 'Windows'),
     'keyring': ('25.7.0', 'MIT', 'Dostęp do systemowego magazynu poświadczeń.', 'Windows'),
@@ -9790,6 +9847,7 @@ _TECHNOLOGY_LICENSES = {
     'jaraco.functools': ('4.6.0', 'MIT', 'Narzędzia funkcyjne używane przez keyring.', 'Windows'),
     'more-itertools': ('11.1.0', 'MIT', 'Operacje na iteratorach w zależnościach.', 'Windows'),
     'pywin32-ctypes': ('0.2.3', 'BSD-3-Clause', 'Powiązania z Windows dla magazynu poświadczeń.', 'Windows'),
+    'truststore': ('0.10.5', 'MIT', 'Weryfikacja certyfikatów HTTPS w systemowym magazynie zaufania.', 'Windows'),
     'importlib_metadata': ('9.0.1', 'Apache-2.0', 'Metadane pakietów dla starszego Pythona.', 'Windows · Python 3.10–3.11'),
     'zipp': ('4.1.0', 'MIT', 'Obsługa archiwów w importlib_metadata.', 'Windows · Python 3.10–3.11'),
     'backports.tarfile': ('1.2.0', 'MIT', 'Zgodność obsługi archiwów dla starszego Pythona.', 'Windows · Python 3.10–3.11'),
@@ -14742,6 +14800,11 @@ def shortcut_self_test():
                     raise AssertionError('Shortcut icon frame dimensions do not match its ICO directory')
             check((reserved, kind) == (0, 1) and sizes == [16, 24, 32, 48, 64, 128, 256],
                   'shortcut icon contains real app-logo frames for normal Windows icon sizes')
+            tile = _dock_icon().pixmap(QSize(1024, 1024), 1.0).toImage()
+            check(tile.width() == tile.height() == 1024 and not tile.pixelColor(8, 8).alpha()
+                  and tile.pixelColor(512, 130).alpha() == 255
+                  and any(tile.pixelColor(x, 512).red() > 150 for x in range(100, 924, 4)),
+                  'macOS Dock tile keeps transparent corners around an opaque tile carrying the gold logo')
             executable = root / 'private runtime' / 'pythonw.exe'
             executable.parent.mkdir(); executable.write_bytes(b'fixture; never launched')
             script = root / "źródła & app's folder" / 'gitline.py'
@@ -15092,7 +15155,7 @@ def bootstrap_self_test():
         dependency_nodes.append(node)
     dependency_code = compile(ast.Module(body=dependency_nodes, type_ignores=[]), '<Windows dependency declarations>', 'exec')
     base = {'PySide6-Essentials', 'shiboken6', 'keyring', 'jaraco.classes', 'jaraco.context',
-            'jaraco.functools', 'more-itertools', 'pywin32-ctypes'}
+            'jaraco.functools', 'more-itertools', 'pywin32-ctypes', 'truststore'}
     backports = {'importlib_metadata', 'zipp', 'backports.tarfile'}
     check(set(_LOCKED_WHEELS) == set(_TECHNOLOGY_LICENSES) == base | backports,
           'wheel hashes and declared license catalog contain only the Windows package set')
@@ -17958,6 +18021,9 @@ def run_application():
             pass
     app = (None if testing else _EARLY_GUI_APP) or QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName(APP_ID); app.setApplicationDisplayName(APP_NAME); app.setOrganizationName(APP_ID)
+    if sys.platform == 'darwin' and QApplication.platformName() == 'cocoa':
+        # A script has no application bundle, so the Dock would keep the interpreter's icon.
+        app.setWindowIcon(_dock_icon())
     if os.name == 'nt' and os.environ.get('QT_QPA_PLATFORM') == 'offscreen':
         for font_name in ('segoeui.ttf', 'segoeuib.ttf', 'seguisb.ttf', 'consola.ttf'):
             font_path = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Fonts' / font_name
