@@ -1251,21 +1251,41 @@ def _icns(frames) -> bytes:
     return b'icns' + struct.pack('>I', len(body) + 8) + body
 
 
+_MACOS_BUNDLE_FORMAT = 2  # Raise whenever the bundle's layout or its launcher changes.
+_APPLICATION_TRIAL = None
+
+
+def _macos_bundle_stamp(runtime_python: Path, script: Path) -> str:
+    """Everything a bundle is built from; a change in any of it rebuilds the bundle."""
+    import hashlib
+    interpreter = Path(sys.base_prefix) / 'Resources' / 'Python.app' / 'Contents' / 'MacOS' / 'Python'
+    try:
+        status = interpreter.stat(); source = [status.st_size, status.st_mtime_ns]
+    except OSError:
+        source = None
+    built_from = [_MACOS_BUNDLE_FORMAT, APP_VERSION, str(script), str(runtime_python), source]
+    return hashlib.sha256(json.dumps(built_from).encode('utf-8')).hexdigest()
+
+
 def _write_macos_bundle(bundle: Path, runtime_python: Path, script: Path, icon: bytes) -> None:
-    """A launcher application for the Dock, which keeps applications but not scripts."""
+    """An application for the Dock, which shows and keeps applications but not scripts."""
     import hashlib
     import plistlib
     import shlex
     import shutil
     executables, resources = bundle / 'Contents' / 'MacOS', bundle / 'Contents' / 'Resources'
     executables.mkdir(parents=True, exist_ok=True); resources.mkdir(parents=True, exist_ok=True)
+    # A rewritten bundle has to be seen to start again before anything relies on it.
+    for marker in ('verified', 'starting'):
+        (bundle / 'Contents' / marker).unlink(missing_ok=True)
     (resources / f'{APP_NAME}.icns').write_bytes(icon)
     (bundle / 'Contents' / 'Info.plist').write_bytes(plistlib.dumps({
         'CFBundleName': APP_NAME, 'CFBundleDisplayName': APP_NAME, 'CFBundleExecutable': APP_NAME,
         'CFBundleIconFile': APP_NAME, 'CFBundlePackageType': 'APPL', 'CFBundleInfoDictionaryVersion': '6.0',
         'CFBundleIdentifier': 'local.gitline.' + hashlib.sha256(str(script).encode('utf-8')).hexdigest()[:12],
         'CFBundleShortVersionString': APP_VERSION, 'CFBundleVersion': APP_VERSION,
-        'NSHighResolutionCapable': True, 'NSPrincipalClass': 'NSApplication'}))
+        'NSHighResolutionCapable': True, 'NSPrincipalClass': 'NSApplication',
+        'GitlineBundle': _macos_bundle_stamp(runtime_python, script)}))
     # A framework build keeps its real interpreter in Python.app. Started from there, macOS shows
     # a second tile named Python; a copy inside this bundle keeps one tile named Gitline.
     base = Path(sys.base_prefix)
@@ -1280,13 +1300,17 @@ def _write_macos_bundle(bundle: Path, runtime_python: Path, script: Path, icon: 
     launcher = executables / APP_NAME
     launcher.write_text(
         '#!/bin/sh\n'
-        f'# Written by {APP_NAME} for its Dock tile; pinning again rewrites it.\n'
+        f'# Written by {APP_NAME} for its Dock tile; the application rewrites it when what it names changes.\n'
         f'runtime={shlex.quote(str(runtime_python))}\n'
         f'script={shlex.quote(str(script))}\n'
         'own="${0%/*}/python"\n'
         'if [ -x "$runtime" ]; then\n'
         '    export __PYVENV_LAUNCHER__="$runtime"\n'
-        '    if "$own" -I -c "import sys; sys.exit(sys.prefix == sys.base_prefix)" 2>/dev/null; then\n'
+        '    # "starting" remains after a start from this bundle that never reached its window.\n'
+        '    if [ ! -e "${0%/*}/../starting" ] \\\n'
+        '            && "$own" -I -c "import sys; sys.exit(sys.prefix == sys.base_prefix)" 2>/dev/null; then\n'
+        '        : > "${0%/*}/../starting"\n'
+        '        export GITLINE_BUNDLE_ENTERED=1\n'
         '        exec "$own" -I -X utf8 "$script" "$@"\n'
         '    fi\n'
         '    exec "$runtime" -I -X utf8 "$script" "$@"\n'
@@ -1294,6 +1318,82 @@ def _write_macos_bundle(bundle: Path, runtime_python: Path, script: Path, icon: 
         '# Without its private environment the script prepares one again, as on a first start.\n'
         f'exec {shlex.quote(str(fallback))} "$script" "$@"\n', encoding='utf-8', newline='\n')
     launcher.chmod(0o755)
+
+
+def _bundle_note(text: str) -> None:
+    """Record why a start did not use the application bundle; nothing else reports it."""
+    with contextlib.suppress(OSError):
+        APP_DATA.mkdir(parents=True, exist_ok=True)
+        with _BOOTSTRAP_LOG.open('a', encoding='utf-8') as log:
+            log.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {text}\n")
+
+
+def _prepare_macos_bundle(runtime_python: Path):
+    """The interpreter inside this copy's bundle, once the bundle is current and has been seen to start."""
+    import plistlib
+    script, contents = Path(__file__).resolve(), _dock_bundle() / 'Contents'
+    own, stamp = contents / 'MacOS' / 'python', _macos_bundle_stamp(runtime_python, script)
+    failed = APP_DATA / 'application-bundle.failed'
+    def recorded(path):
+        try: return path.read_text(encoding='utf-8')
+        except OSError: return ''
+    def current():
+        try: return plistlib.loads((contents / 'Info.plist').read_bytes()).get('GitlineBundle') == stamp
+        except Exception: return False  # A missing or damaged description is simply written again.
+    if recorded(failed) == stamp:
+        return None
+    environment, quiet = _bootstrap_env(), dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not current():
+            # Only the private environment has Qt to paint the icon, so its interpreter writes the bundle.
+            writer = ("import importlib.util,sys; "
+                      "spec=importlib.util.spec_from_file_location('_gitline_bundle',sys.argv[1]); "
+                      "module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module; "
+                      "spec.loader.exec_module(module); module.write_dock_bundle()")
+            subprocess.run([str(runtime_python), '-I', '-B', '-X', 'utf8', '-c', writer, str(script)],
+                           env=dict(environment, QT_QPA_PLATFORM='offscreen'), timeout=120, **quiet)
+        usable = current() and own.is_file()
+        if usable and recorded(contents / 'verified') != stamp:
+            usable = not subprocess.run(
+                [str(own), '-I', '-c', 'import sys; sys.exit(sys.prefix == sys.base_prefix)'],
+                env=dict(environment, __PYVENV_LAUNCHER__=str(runtime_python)), timeout=60, **quiet).returncode
+            if usable: (contents / 'verified').write_text(stamp, encoding='utf-8')
+    except (OSError, subprocess.SubprocessError):
+        usable = False
+    if not usable:
+        # Remembered for this exact build, so later starts do not repeat the attempt.
+        APP_DATA.mkdir(parents=True, exist_ok=True); failed.write_text(stamp, encoding='utf-8')
+        _bundle_note(f'{APP_NAME}.app nie nadaje się do uruchamiania; start zwykłym interpreterem.')
+        return None
+    return own
+
+
+def _enter_application_bundle() -> None:
+    """On macOS continue inside this copy's application bundle, so the Dock shows and keeps Gitline, not Python."""
+    global _APPLICATION_TRIAL
+    entered = os.environ.pop('GITLINE_BUNDLE_ENTERED', '')
+    if sys.platform != 'darwin' or not _normal_gui_start():
+        return
+    trial = _dock_bundle() / 'Contents' / 'starting'
+    if entered:
+        _APPLICATION_TRIAL = trial
+        return
+    try:
+        if not sys.flags.isolated or Path(sys.prefix).resolve() != _RUNTIME_DIR.resolve():
+            return
+        if trial.exists():
+            _bundle_note(f'Pominięto {APP_NAME}.app: poprzedni start z niego nie doszedł do okna.')
+            return
+        runtime_python = _RUNTIME_DIR / 'bin' / 'python'
+        own = _prepare_macos_bundle(runtime_python)
+        if own is None:
+            return
+        trial.write_text('', encoding='utf-8')
+        os.execve(str(own), [str(own), '-I', '-X', 'utf8', str(Path(__file__).resolve()), *sys.argv[1:]],
+                  dict(os.environ, __PYVENV_LAUNCHER__=str(runtime_python), GITLINE_BUNDLE_ENTERED='1'))
+    except Exception as error:
+        # The bundle only changes how macOS labels the process; any failure keeps the ordinary start.
+        _bundle_note(f'Start z {APP_NAME}.app nie powiódł się ({type(error).__name__}); start zwykłym interpreterem.')
 
 
 def _dock_command(arguments, data=None) -> bytes:
@@ -2456,6 +2556,7 @@ def bootstrap(_source=None, *, _retained=False) -> None:
 if __name__ == '__main__':
     _prepare_gui_console()
     if not any(argument in sys.argv[1:] for argument in ('--credential-helper', '--auth-lock-test-child')):
+        _enter_application_bundle()
         bootstrap()
         try:
             _start_early_gui()
@@ -8427,6 +8528,7 @@ def dock_available():
 def write_dock_bundle():
     """Create or refresh this copy's launcher bundle with the application's own tile as its icon."""
     from PySide6.QtCore import QByteArray, QBuffer, QIODevice
+    app = QApplication.instance() or QApplication([])  # Painting needs one; the bundle writer has none yet.
     icon, frames = _dock_icon(), []
     for kind, size in ((b'ic11', 32), (b'ic12', 64), (b'ic07', 128), (b'ic13', 256), (b'ic08', 256),
                        (b'ic14', 512), (b'ic09', 512), (b'ic10', 1024)):
@@ -15104,7 +15206,10 @@ def shortcut_self_test():
                   and container[16:21] == b'first' and container[21:25] == b'ic08' and container.endswith(b'second!'),
                   'icon container records its own length and every image behind a type and a length')
             bundle, started = root / 'Gitline.app', root / "źródła & app's folder" / 'gitline.py'
-            _write_macos_bundle(bundle, root / 'private runtime' / 'bin' / 'python', started, container)
+            runtime_fixture = root / 'private runtime' / 'bin' / 'python'
+            (bundle / 'Contents').mkdir(parents=True)
+            for marker in ('verified', 'starting'): (bundle / 'Contents' / marker).write_text('stale', encoding='utf-8')
+            _write_macos_bundle(bundle, runtime_fixture, started, container)
             described = plistlib.loads((bundle / 'Contents' / 'Info.plist').read_bytes())
             launcher = (bundle / 'Contents' / 'MacOS' / 'Gitline').read_bytes()
             check(described['CFBundleExecutable'] == described['CFBundleIconFile'] == described['CFBundleName'] == 'Gitline'
@@ -15114,6 +15219,9 @@ def shortcut_self_test():
                   and ('script=' + auth_shlex.quote(str(started)) + '\n').encode('utf-8') in launcher
                   and (os.name == 'nt' or os.access(bundle / 'Contents' / 'MacOS' / 'Gitline', os.X_OK)),
                   'Dock launcher bundle names its icon and starts this copy through a quoted shell script')
+            check(described['GitlineBundle'] == _macos_bundle_stamp(runtime_fixture, started)
+                  and not (bundle / 'Contents' / 'verified').exists() and not (bundle / 'Contents' / 'starting').exists(),
+                  'a rewritten bundle records what it was built from and must be seen to start again')
             docked = PurePosixPath('/Users/test/R&D/.gitline/Gitline.app')
             safari = {'tile-data': {'file-data': {'_CFURLString': 'file:///Applications/Safari.app/', '_CFURLStringType': 15},
                                     'book': b'\x00bookmark'}, 'GUID': 7}
@@ -15161,6 +15269,58 @@ def shortcut_self_test():
                         except RuntimeError: pass
                         else: raise AssertionError('Unreadable Dock preferences should stop the change')
                     check(commands == ['export', 'export'], 'unreadable or incomplete Dock preferences are never written back')
+            spawned, outcome = [], [0]
+            def spawn(command, **options):
+                spawned.append(command)
+                if '-B' in command:
+                    _write_macos_bundle(_dock_bundle(), runtime_fixture, Path(__file__).resolve(), container)
+                    (_dock_bundle() / 'Contents' / 'MacOS' / 'python').write_bytes(b'fixture; never executed')
+                return subprocess.CompletedProcess(command, outcome[0])
+            with patch.dict(globals(), APP_DATA=root / 'bundled', _BOOTSTRAP_LOG=root / 'bundled' / 'bootstrap.log'), \
+                    patch.object(subprocess, 'run', spawn):
+                own = _prepare_macos_bundle(runtime_fixture)
+                contents = root / 'bundled' / 'Gitline.app' / 'Contents'
+                check(own == contents / 'MacOS' / 'python' and ['-B' in command for command in spawned] == [True, False]
+                      and spawned[1][0] == str(own) and (contents / 'verified').read_text(encoding='utf-8')
+                      == _macos_bundle_stamp(runtime_fixture, Path(__file__).resolve()),
+                      'a missing bundle is written by the private environment and its interpreter is checked once')
+                spawned.clear()
+                check(_prepare_macos_bundle(runtime_fixture) == own and not spawned,
+                      'a current, verified bundle is used without starting anything')
+                with patch.dict(globals(), APP_VERSION='9.9.9'):
+                    outcome[0] = 1
+                    check(_prepare_macos_bundle(runtime_fixture) is None and len(spawned) == 2,
+                          'a changed build is rewritten, and an interpreter outside the environment is refused')
+                    spawned.clear()
+                    check(_prepare_macos_bundle(runtime_fixture) is None and not spawned
+                          and 'Gitline.app' in (root / 'bundled' / 'bootstrap.log').read_text(encoding='utf-8'),
+                          'a refused build is remembered and noted instead of being retried at every start')
+            executed, entered_root = [], root / 'entered'
+            trial = entered_root / 'Gitline.app' / 'Contents' / 'starting'
+            trial.parent.mkdir(parents=True)
+            with patch.dict(globals(), APP_DATA=entered_root, _RUNTIME_DIR=root / 'entered runtime', _APPLICATION_TRIAL=None,
+                            _BOOTSTRAP_LOG=entered_root / 'bootstrap.log',
+                            _prepare_macos_bundle=lambda python: trial.parent / 'MacOS' / 'python'), \
+                    patch.object(sys, 'platform', 'darwin'), patch.object(sys, 'argv', ['gitline.py', 'repository']), \
+                    patch.object(sys, 'flags', SimpleNamespace(isolated=1, interactive=0, inspect=0)), \
+                    patch.object(sys, 'prefix', str(root / 'entered runtime')), \
+                    patch.object(os, 'execve', lambda *arguments: executed.append(arguments)), patch.dict(os.environ):
+                os.environ.pop('GITLINE_BUNDLE_ENTERED', None)
+                _enter_application_bundle()
+                check(len(executed) == 1 and executed[0][0] == str(trial.parent / 'MacOS' / 'python')
+                      and executed[0][1][1:4] == ['-I', '-X', 'utf8'] and executed[0][1][-1] == 'repository'
+                      and executed[0][2]['__PYVENV_LAUNCHER__'] == str(root / 'entered runtime' / 'bin' / 'python')
+                      and executed[0][2]['GITLINE_BUNDLE_ENTERED'] == '1' and trial.exists(),
+                      'macOS continues inside the application bundle and marks the attempt')
+                _enter_application_bundle()
+                check(len(executed) == 1, 'an attempt that never reached its window is not repeated')
+                trial.unlink(); os.environ['GITLINE_BUNDLE_ENTERED'] = '1'
+                _enter_application_bundle()
+                check(len(executed) == 1 and globals()['_APPLICATION_TRIAL'] == trial and 'GITLINE_BUNDLE_ENTERED' not in os.environ,
+                      'inside the bundle the application starts normally and knows which attempt to confirm')
+                with patch.object(sys, 'platform', 'win32'):
+                    _enter_application_bundle()
+                check(len(executed) == 1, 'other systems never look for an application bundle')
             executable = root / 'private runtime' / 'pythonw.exe'
             executable.parent.mkdir(); executable.write_bytes(b'fixture; never launched')
             script = root / "źródła & app's folder" / 'gitline.py'
@@ -18412,6 +18572,9 @@ def run_application():
         if temporary_data is not None:
             temporary_data.cleanup()
         raise
+    if _APPLICATION_TRIAL is not None:
+        # The window is up, so starting from the application bundle works and may be used again.
+        with contextlib.suppress(OSError): _APPLICATION_TRIAL.unlink()
     gui_errors = []
     original_exception_hook = sys.excepthook
     def ui_exception_handler(exception_type, value, tb):

@@ -44,7 +44,7 @@ python gitline.py C:\projekty\app    # od razu otwórz wskazane repozytorium
 python gitline.py --help             # pomoc bez instalowania czegokolwiek
 ```
 
-Na macOS polecenie to `python3 gitline.py`. Potrzebny jest Python z Tk (instalator z python.org albo Homebrew z pakietem `python-tk`) oraz Git z narzędzi wiersza poleceń Apple albo z Homebrew — jeśli go nie ma, Gitline zapyta, czy uruchomić instalator Apple. Skróty na pulpicie i w menu Start, przypinanie do paska zadań i prywatna kopia Gita działają tylko w Windows. Na macOS Gitline może przypiąć się do Docka: pyta o to przy pierwszym starcie, a pole „Przypięty do Docka” jest w oknie „O aplikacji”.
+Na macOS polecenie to `python3 gitline.py`. Potrzebny jest Python z Tk (instalator z python.org albo Homebrew z pakietem `python-tk`) oraz Git z narzędzi wiersza poleceń Apple albo z Homebrew — jeśli go nie ma, Gitline zapyta, czy uruchomić instalator Apple. Skróty na pulpicie i w menu Start, przypinanie do paska zadań i prywatna kopia Gita działają tylko w Windows. Na macOS Gitline uruchamia się jako własna aplikacja (`Gitline.app` w `.gitline`), więc Dock pokazuje jego nazwę i ikonę, a systemowe „Zatrzymaj w Docku” działa. Sam też pyta o przypięcie przy pierwszym starcie, a pole „Przypięty do Docka” jest w oknie „O aplikacji”.
 
 Przed instalacją bibliotek pojawia się okno wyboru źródła pakietów: **publiczne PyPI** albo **firmowe Artifactory** (hasło jest użyte wyłącznie do tej jednej instalacji i nigdzie nie jest zapisywane). To samo okno pokazuje postęp i zamyka się dopiero wtedy, gdy loader 3D narysuje pierwszą klatkę.
 
