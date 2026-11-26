@@ -44,7 +44,7 @@ python gitline.py C:\projekty\app    # od razu otwórz wskazane repozytorium
 python gitline.py --help             # pomoc bez instalowania czegokolwiek
 ```
 
-Na macOS polecenie to `python3 gitline.py`. Potrzebny jest Python z Tk (instalator z python.org albo Homebrew z pakietem `python-tk`) oraz Git z narzędzi wiersza poleceń Apple albo z Homebrew — jeśli go nie ma, Gitline zapyta, czy uruchomić instalator Apple. Skróty, przypinanie do paska zadań i prywatna kopia Gita działają tylko w Windows.
+Na macOS polecenie to `python3 gitline.py`. Potrzebny jest Python z Tk (instalator z python.org albo Homebrew z pakietem `python-tk`) oraz Git z narzędzi wiersza poleceń Apple albo z Homebrew — jeśli go nie ma, Gitline zapyta, czy uruchomić instalator Apple. Skróty na pulpicie i w menu Start, przypinanie do paska zadań i prywatna kopia Gita działają tylko w Windows. Na macOS Gitline może przypiąć się do Docka: pyta o to przy pierwszym starcie, a pole „Przypięty do Docka” jest w oknie „O aplikacji”.
 
 Przed instalacją bibliotek pojawia się okno wyboru źródła pakietów: **publiczne PyPI** albo **firmowe Artifactory** (hasło jest użyte wyłącznie do tej jednej instalacji i nigdzie nie jest zapisywane). To samo okno pokazuje postęp i zamyka się dopiero wtedy, gdy loader 3D narysuje pierwszą klatkę.
 
@@ -113,7 +113,7 @@ Konta GitHub, GitLab i firmowych serwerów łączysz raz — tokeny trafiają do
 | **Historia** | zmiana opisu, squash wielu commitów, cofnięcie ostatniego commita, revert z odzyskiwaniem, plan force‑push z jawnym potwierdzeniem |
 | **Schowek** | odłożenie i przywrócenie zmian (stash) bez opuszczania okna |
 | **Konta** | GitHub, GitLab i własne serwery HTTPS; automatyczny dobór konta dla repozytorium, ręczny wybór pamiętany per repozytorium, katalog projektów do sklonowania |
-| **Komfort** | bezramkowe okno w ciemnym motywie, paleta poleceń, ostatnie repozytoria, przypinanie do paska zadań, tryb kończenia pracy czekający na trwające operacje |
+| **Komfort** | bezramkowe okno w ciemnym motywie, paleta poleceń, ostatnie repozytoria, przypinanie do paska zadań (Windows) lub Docka (macOS), tryb kończenia pracy czekający na trwające operacje |
 | **Przejrzystość** | okno *Technologie i licencje* z pełną listą składników, ich wersjami i tekstami licencji |
 
 <br>
@@ -140,7 +140,7 @@ Konta GitHub, GitLab i firmowych serwerów łączysz raz — tokeny trafiają do
 ├── gitline.py               ← jedyny plik, który udostępniasz
 ├── gitline.json             ← ustawienia tej kopii (bez tokenów)
 ├── .gitline-venv-3.12/      ← prywatne środowisko dla używanej wersji Pythona
-└── .gitline/                ← dzienniki, prywatny MinGit (jeśli pobrany), ikony skrótów
+└── .gitline/                ← dzienniki, prywatny MinGit (jeśli pobrany), ikony skrótów, na macOS Gitline.app dla Docka
 ```
 
 Tokeny kont **nigdy** nie lądują w tych plikach — mieszkają w systemowym magazynie poświadczeń (Windows Credential Manager albo pęk kluczy macOS, przez `keyring`). Zwykłe uruchomienia ignorują odziedziczone zmienne środowiskowe innych kopii i nie importują cudzych ustawień.

@@ -1237,6 +1237,143 @@ def _install_windows_shortcuts(runtime_python: Path, choices: dict) -> dict:
     return result
 
 
+_DOCK_PREFERENCES = 'com.apple.dock'
+
+
+def _dock_bundle() -> Path:
+    return APP_DATA / f'{APP_NAME}.app'
+
+
+def _icns(frames) -> bytes:
+    """Apple's icon container: a header, then every PNG behind its four-letter type and length."""
+    import struct
+    body = b''.join(kind + struct.pack('>I', len(image) + 8) + image for kind, image in frames)
+    return b'icns' + struct.pack('>I', len(body) + 8) + body
+
+
+def _write_macos_bundle(bundle: Path, runtime_python: Path, script: Path, icon: bytes) -> None:
+    """A launcher application for the Dock, which keeps applications but not scripts."""
+    import hashlib
+    import plistlib
+    import shlex
+    import shutil
+    executables, resources = bundle / 'Contents' / 'MacOS', bundle / 'Contents' / 'Resources'
+    executables.mkdir(parents=True, exist_ok=True); resources.mkdir(parents=True, exist_ok=True)
+    (resources / f'{APP_NAME}.icns').write_bytes(icon)
+    (bundle / 'Contents' / 'Info.plist').write_bytes(plistlib.dumps({
+        'CFBundleName': APP_NAME, 'CFBundleDisplayName': APP_NAME, 'CFBundleExecutable': APP_NAME,
+        'CFBundleIconFile': APP_NAME, 'CFBundlePackageType': 'APPL', 'CFBundleInfoDictionaryVersion': '6.0',
+        'CFBundleIdentifier': 'local.gitline.' + hashlib.sha256(str(script).encode('utf-8')).hexdigest()[:12],
+        'CFBundleShortVersionString': APP_VERSION, 'CFBundleVersion': APP_VERSION,
+        'NSHighResolutionCapable': True, 'NSPrincipalClass': 'NSApplication'}))
+    # A framework build keeps its real interpreter in Python.app. Started from there, macOS shows
+    # a second tile named Python; a copy inside this bundle keeps one tile named Gitline.
+    base = Path(sys.base_prefix)
+    interpreter, own = base / 'Resources' / 'Python.app' / 'Contents' / 'MacOS' / 'Python', executables / 'python'
+    if interpreter.is_file():
+        # Gitline may be running from this very file: replace it instead of writing into it.
+        staged = own.with_name('python.new')
+        shutil.copy2(interpreter, staged); staged.replace(own)
+    else:
+        own.unlink(missing_ok=True)
+    fallback = base / 'bin' / f'python{sys.version_info.major}.{sys.version_info.minor}'
+    launcher = executables / APP_NAME
+    launcher.write_text(
+        '#!/bin/sh\n'
+        f'# Written by {APP_NAME} for its Dock tile; pinning again rewrites it.\n'
+        f'runtime={shlex.quote(str(runtime_python))}\n'
+        f'script={shlex.quote(str(script))}\n'
+        'own="${0%/*}/python"\n'
+        'if [ -x "$runtime" ]; then\n'
+        '    export __PYVENV_LAUNCHER__="$runtime"\n'
+        '    if "$own" -I -c "import sys; sys.exit(sys.prefix == sys.base_prefix)" 2>/dev/null; then\n'
+        '        exec "$own" -I -X utf8 "$script" "$@"\n'
+        '    fi\n'
+        '    exec "$runtime" -I -X utf8 "$script" "$@"\n'
+        'fi\n'
+        '# Without its private environment the script prepares one again, as on a first start.\n'
+        f'exec {shlex.quote(str(fallback))} "$script" "$@"\n', encoding='utf-8', newline='\n')
+    launcher.chmod(0o755)
+
+
+def _dock_command(arguments, data=None) -> bytes:
+    """Run one of Apple's own tools; the Dock gives applications no interface for keeping a tile."""
+    try:
+        result = subprocess.run(arguments, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30,
+                                **({'stdin': subprocess.DEVNULL} if data is None else {'input': data}))
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError('Nie można uruchomić narzędzia ustawień macOS.') from error
+    if result.returncode:
+        raise RuntimeError('Polecenie ustawień macOS nie powiodło się.')
+    return result.stdout
+
+
+def _dock_state():
+    """The Dock's preferences exactly as exported, and decoded."""
+    import plistlib
+    exported = _dock_command(['/usr/bin/defaults', 'export', _DOCK_PREFERENCES, '-'])
+    try:
+        preferences = plistlib.loads(exported)
+    except Exception as error:  # plistlib reports damaged input with several unrelated exception types
+        raise RuntimeError('Nie można odczytać ustawień Docka.') from error
+    if not isinstance(preferences, dict) or not isinstance(preferences.get('persistent-apps'), list):
+        raise RuntimeError('Ustawienia Docka mają nieoczekiwaną postać, więc nic nie zmieniono.')
+    return exported, preferences
+
+
+def _dock_tile_target(tile) -> str:
+    """The application a tile opens; the Dock stores either a path or a file URL."""
+    from urllib.parse import unquote, urlsplit
+    try:
+        target = tile['tile-data']['file-data']['_CFURLString']
+    except (KeyError, TypeError):
+        return ''
+    if not isinstance(target, str):
+        return ''
+    if target.startswith('file://'):
+        target = unquote(urlsplit(target).path)
+    return os.path.normpath(target)
+
+
+def _dock_pinned(bundle) -> bool:
+    wanted = os.path.normpath(str(bundle))
+    return any(_dock_tile_target(tile) == wanted for tile in _dock_state()[1]['persistent-apps'])
+
+
+def _dock_pin(bundle) -> None:
+    """Append this copy's tile; tiles already in the Dock are never rewritten."""
+    from xml.sax.saxutils import escape
+    if _dock_pinned(bundle):
+        return
+    tile = ('<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key>'
+            f'<string>{escape(str(bundle))}</string><key>_CFURLStringType</key><integer>0</integer></dict></dict></dict>')
+    _dock_command(['/usr/bin/defaults', 'write', _DOCK_PREFERENCES, 'persistent-apps', '-array-add', tile])
+    _dock_command(['/usr/bin/killall', 'Dock'])
+
+
+def _dock_unpin(bundle) -> None:
+    """Remove only this copy's tile; the exported original is first saved beside the logs."""
+    import plistlib
+    wanted = os.path.normpath(str(bundle))
+    exported, preferences = _dock_state()
+    tiles = preferences['persistent-apps']
+    kept = [tile for tile in tiles if _dock_tile_target(tile) != wanted]
+    if len(kept) == len(tiles):
+        return
+    backup = APP_DATA / 'dock-before-unpin.plist'
+    backup.parent.mkdir(parents=True, exist_ok=True); backup.write_bytes(exported)
+    changed = plistlib.dumps(dict(preferences, **{'persistent-apps': kept}), fmt=plistlib.FMT_BINARY)
+    _dock_command(['/usr/bin/defaults', 'import', _DOCK_PREFERENCES, '-'], changed)
+    try:
+        saved = [_dock_tile_target(tile) for tile in _dock_state()[1]['persistent-apps']]
+    except RuntimeError:
+        saved = None
+    if saved != [_dock_tile_target(tile) for tile in kept]:
+        _dock_command(['/usr/bin/defaults', 'import', _DOCK_PREFERENCES, '-'], exported)
+        raise RuntimeError(f'Dock nie zapisał zmiany poprawnie, więc przywrócono poprzednie ustawienia. Ich kopia: {backup}')
+    _dock_command(['/usr/bin/killall', 'Dock'])
+
+
 class _WindowsTaskbarPinRequest:
     """Documented TaskbarManager request; created and polled on the foreground UI thread."""
     # https://learn.microsoft.com/windows/apps/develop/windows-integration/pin-to-taskbar
@@ -8282,6 +8419,27 @@ def _dock_icon():
     return QIcon(pixmap)
 
 
+def dock_available():
+    """Keeping a Dock tile is offered only inside a real macOS desktop session."""
+    return sys.platform == 'darwin' and QApplication.platformName() == 'cocoa'
+
+
+def write_dock_bundle():
+    """Create or refresh this copy's launcher bundle with the application's own tile as its icon."""
+    from PySide6.QtCore import QByteArray, QBuffer, QIODevice
+    icon, frames = _dock_icon(), []
+    for kind, size in ((b'ic11', 32), (b'ic12', 64), (b'ic07', 128), (b'ic13', 256), (b'ic08', 256),
+                       (b'ic14', 512), (b'ic09', 512), (b'ic10', 1024)):
+        data = QByteArray(); buffer = QBuffer(data)
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        if not icon.pixmap(QSize(size, size), 1.0).save(buffer, 'PNG'):
+            raise RuntimeError('Nie można przygotować ikony Gitline.')
+        frames.append((kind, bytes(data)))
+    bundle = _dock_bundle()
+    _write_macos_bundle(bundle, _RUNTIME_DIR / 'bin' / 'python', Path(__file__).resolve(), _icns(frames))
+    return bundle
+
+
 def ui_button(text, callback=None, icon=None, kind=''):
     button = QPushButton(text)
     if kind: button.setObjectName(kind)
@@ -11615,6 +11773,52 @@ class MainWindow(FramelessWindow):
             self.dismiss_taskbar_pin()
             if result is True: self.status.setText('Gitline przypięty do paska zadań.')
 
+    def _dock_answered(self):
+        """The question about the Dock is asked once; the checkbox in the information window remains."""
+        if self.persist:
+            with _config_lock():
+                bootstrap = _config_section('bootstrap', {})
+                bootstrap['dock_prompted'] = True
+                _set_config_section('bootstrap', bootstrap)
+        self.shortcut_notice.hide()
+
+    def pin_to_dock(self):
+        try:
+            _dock_pin(write_dock_bundle())
+        except (OSError, RuntimeError) as error:
+            self.show_error('Nie udało się przypiąć Gitline do Docka. ' + str(error))
+            return False
+        self._dock_answered()
+        self.status.setText('Gitline przypięty do Docka. Od teraz możesz uruchamiać go stamtąd.')
+        return True
+
+    def unpin_from_dock(self):
+        try:
+            _dock_unpin(_dock_bundle())
+        except (OSError, RuntimeError) as error:
+            self.show_error('Nie udało się odpiąć Gitline z Docka. ' + str(error))
+            return False
+        # The Dock keeps the tile of a running application until it quits.
+        self.status.setText('Gitline odpięty z Docka. Jeśli jest teraz uruchomiony stamtąd, ikona zniknie po jego zamknięciu.')
+        return True
+
+    def set_dock_pin(self, box, checked):
+        """Pin on request; unpinning takes a tile away, so it asks first."""
+        if checked:
+            box.setChecked(self.pin_to_dock())
+            return
+        box.setChecked(True)
+        question = QMessageBox(box.window()); question.setWindowTitle(APP_NAME)
+        question.setText('Odpiąć Gitline z Docka?')
+        question.addButton('Tak', QMessageBox.ButtonRole.YesRole)
+        question.addButton('Nie', QMessageBox.ButtonRole.NoRole)
+        def answered(*unused):
+            if question.buttonRole(question.clickedButton()) == QMessageBox.ButtonRole.YesRole:
+                box.setChecked(not self.unpin_from_dock())
+            question.deleteLater()
+        question.finished.connect(answered)
+        question.open()
+
     def build_ui(self):
         root = QWidget(); self.setCentralWidget(root)
         outer = QVBoxLayout(root); outer.setContentsMargins(0, 0, 0, 0); outer.setSpacing(0)
@@ -11659,14 +11863,18 @@ class MainWindow(FramelessWindow):
         outer.addWidget(context)
         self.shortcut_notice = QFrame(); self.shortcut_notice.setObjectName('notice')
         shortcut_row = QHBoxLayout(self.shortcut_notice); shortcut_row.setContentsMargins(16, 8, 16, 8)
-        self.shortcut_label = ui_label('Gitline może być dostępny z paska zadań.', wrap=True)
+        # Windows asks for its taskbar after setup offered it; macOS asks about the Dock once.
+        dock = dock_available()
+        self.shortcut_label = ui_label('Przypiąć Gitline do Docka?' if dock else 'Gitline może być dostępny z paska zadań.', wrap=True)
         shortcut_row.addWidget(self.shortcut_label, 1)
-        self.shortcut_button = ui_button('Przypnij do paska', self.request_taskbar_pin, kind='toolbarAction')
+        self.shortcut_button = ui_button('Przypnij do Docka' if dock else 'Przypnij do paska',
+                                         self.pin_to_dock if dock else self.request_taskbar_pin, kind='toolbarAction')
         shortcut_row.addWidget(self.shortcut_button)
-        shortcut_row.addWidget(ui_button('Nie teraz', self.dismiss_taskbar_pin, kind='ghost'))
+        shortcut_row.addWidget(ui_button('Nie teraz', self._dock_answered if dock else self.dismiss_taskbar_pin, kind='ghost'))
         outer.addWidget(self.shortcut_notice)
-        self.shortcut_notice.setVisible(self.persist and sys.platform == 'win32'
-                                       and bool(_config_section('bootstrap', {}).get('taskbar_pending')))
+        asked = _config_section('bootstrap', {}) if self.persist and (dock or sys.platform == 'win32') else {}
+        self.shortcut_notice.setVisible(self.persist and (not asked.get('dock_prompted') if dock
+                                                           else bool(asked.get('taskbar_pending'))))
         self._startup_checkpoint()
         self.build_repo_picker()
         self.pages = QStackedWidget(); outer.addWidget(self.pages, 1)
@@ -14165,8 +14373,15 @@ class MainWindow(FramelessWindow):
             'Skróty: Ctrl+O — otwórz, Ctrl+N — nowe, Ctrl+Shift+O — klonuj, '
             'Ctrl+K — polecenia, Ctrl+Enter — commit, Ctrl+F — szukaj w diffie, F5 — odśwież.')
         layout.addWidget(info, 1)
+        if dock_available():
+            pinned = QCheckBox('Przypięty do Docka')
+            try: pinned.setChecked(_dock_pinned(_dock_bundle()))
+            except RuntimeError as error: pinned.setEnabled(False); pinned.setToolTip(str(error))
+            pinned.clicked.connect(lambda checked: self.set_dock_pin(pinned, checked))
+            layout.addWidget(pinned)
         layout.addWidget(ui_button('Technologie i licencje…', self.show_technologies, kind='toolbarAction'))
-        close = ui_button('Gotowe', dialog.accept, kind='primary'); layout.addWidget(close); self.keep_dialog(dialog)
+        close = ui_button('Gotowe', dialog.accept, kind='primary'); layout.addWidget(close)
+        return self.keep_dialog(dialog)
 
     def _shutdown_accounts(self):
         return [dialog for dialog in self._dialogs if getattr(dialog, '_worker', None) is not None]
@@ -14630,6 +14845,41 @@ def taskbar_ui_self_test():
                     finally:
                         window.close(); window.deleteLater(); app.processEvents()
                     check(request.closed == (0 if name == 'unsupported' else 1), name + ': window cleanup is idempotent')
+            _set_config_section('bootstrap', {'keep': 'unchanged'})
+            pinned, moves = [False], []
+            def pin(bundle): moves.append(('pin', bundle)); pinned[0] = True
+            def unpin(bundle): moves.append(('unpin', bundle)); pinned[0] = False
+            with patch.dict(globals(), dock_available=lambda: True, write_dock_bundle=lambda: 'bundle',
+                            _dock_pin=pin, _dock_unpin=unpin, _dock_pinned=lambda bundle: pinned[0]):
+                window = MainWindow(persist=True, startup_tick=lambda: None)
+                try:
+                    deadline = time.monotonic() + 5
+                    while window.hub.jobs and time.monotonic() < deadline:
+                        app.processEvents(); time.sleep(.005)
+                    check(not window.shortcut_notice.isHidden() and 'Docka' in window.shortcut_label.text() and not moves,
+                          'macOS asks about the Dock and waits for the answer')
+                    window.shortcut_button.click()
+                    check(moves == [('pin', 'bundle')] and window.shortcut_notice.isHidden()
+                          and _config_section('bootstrap') == {'keep': 'unchanged', 'dock_prompted': True}
+                          and 'przypięty do Docka' in window.status.text(),
+                          'accepting pins this copy once and does not ask again')
+                    about = window.show_about()
+                    box = about.findChild(QCheckBox)
+                    check(box is not None and box.isChecked(), 'the information window shows the pinned state as a checkbox')
+                    for answer, expected in (('Nie', True), ('Tak', False)):
+                        box.click()
+                        question = about.findChildren(QMessageBox)[-1]
+                        check(box.isChecked() and question.text() == 'Odpiąć Gitline z Docka?' and len(moves) == 1,
+                              answer + ': unchecking asks before anything is removed')
+                        next(button for button in question.buttons() if button.text() == answer).click()
+                        app.processEvents()
+                        check(box.isChecked() is expected and (moves[-1][0] == 'unpin') is not expected,
+                              answer + ': only a confirmed answer unpins the application')
+                    box.click()
+                    check(box.isChecked() and moves[-1] == ('pin', 'bundle'), 'checking the box again pins without another question')
+                    about.close()
+                finally:
+                    window.close(); window.deleteLater(); app.processEvents()
     return {'passed': len(checks), 'checks': checks}
 
 
@@ -14846,6 +15096,71 @@ def shortcut_self_test():
                   and tile.pixelColor(512, 130).alpha() == 255
                   and any(tile.pixelColor(x, 512).red() > 150 for x in range(100, 924, 4)),
                   'macOS Dock tile keeps transparent corners around an opaque tile carrying the gold logo')
+            import plistlib
+            from pathlib import PurePosixPath
+            container = _icns([(b'ic07', b'first'), (b'ic08', b'second!')])
+            check(container[:4] == b'icns' and struct.unpack_from('>I', container, 4)[0] == len(container)
+                  and container[8:12] == b'ic07' and struct.unpack_from('>I', container, 12)[0] == 13
+                  and container[16:21] == b'first' and container[21:25] == b'ic08' and container.endswith(b'second!'),
+                  'icon container records its own length and every image behind a type and a length')
+            bundle, started = root / 'Gitline.app', root / "źródła & app's folder" / 'gitline.py'
+            _write_macos_bundle(bundle, root / 'private runtime' / 'bin' / 'python', started, container)
+            described = plistlib.loads((bundle / 'Contents' / 'Info.plist').read_bytes())
+            launcher = (bundle / 'Contents' / 'MacOS' / 'Gitline').read_bytes()
+            check(described['CFBundleExecutable'] == described['CFBundleIconFile'] == described['CFBundleName'] == 'Gitline'
+                  and described['NSHighResolutionCapable'] is True
+                  and (bundle / 'Contents' / 'Resources' / 'Gitline.icns').read_bytes() == container
+                  and launcher.startswith(b'#!/bin/sh\n') and b'\r' not in launcher
+                  and ('script=' + auth_shlex.quote(str(started)) + '\n').encode('utf-8') in launcher
+                  and (os.name == 'nt' or os.access(bundle / 'Contents' / 'MacOS' / 'Gitline', os.X_OK)),
+                  'Dock launcher bundle names its icon and starts this copy through a quoted shell script')
+            docked = PurePosixPath('/Users/test/R&D/.gitline/Gitline.app')
+            safari = {'tile-data': {'file-data': {'_CFURLString': 'file:///Applications/Safari.app/', '_CFURLStringType': 15},
+                                    'book': b'\x00bookmark'}, 'GUID': 7}
+            saved = {'tilesize': 48.0, 'persistent-apps': [safari]}
+            behaviour = {'export': None, 'ignore_import': False}
+            commands = []
+            def dock_tool(arguments, data=None):
+                commands.append(arguments[1])
+                if arguments[1] == 'export':
+                    return behaviour['export'] or plistlib.dumps(saved)
+                if arguments[1] == 'write':
+                    saved['persistent-apps'].append(plistlib.loads(b'<plist version="1.0">' + arguments[5].encode('utf-8') + b'</plist>'))
+                if arguments[1] == 'import' and not behaviour['ignore_import']:
+                    saved.clear(); saved.update(plistlib.loads(data))
+                return b''
+            with patch.dict(globals(), _dock_command=dock_tool, APP_DATA=root):
+                check(not _dock_pinned(docked), 'another application in the Dock is not mistaken for Gitline')
+                commands.clear(); _dock_pin(docked)
+                check(commands == ['export', 'write', 'Dock'] and saved['persistent-apps'][0] == safari
+                      and _dock_tile_target(saved['persistent-apps'][1]) == os.path.normpath(str(docked)),
+                      'pinning appends one well-formed tile and leaves existing tiles untouched')
+                saved['persistent-apps'][1] = {'tile-data': {'file-data': {
+                    '_CFURLString': 'file:///Users/test/R%26D/.gitline/Gitline.app/', '_CFURLStringType': 15}}}
+                commands.clear(); _dock_pin(docked)
+                check(_dock_pinned(docked) and 'write' not in commands,
+                      'a tile the Dock rewrote as a file URL is recognized and not added twice')
+                before = plistlib.dumps(saved); commands.clear(); _dock_unpin(docked)
+                check(saved == {'tilesize': 48.0, 'persistent-apps': [safari]} and commands == ['export', 'import', 'export', 'Dock']
+                      and (root / 'dock-before-unpin.plist').read_bytes() == before,
+                      'unpinning removes only this tile, keeps the other preferences and saves the original first')
+                commands.clear(); _dock_unpin(docked)
+                check(commands == ['export'], 'unpinning an application that is not in the Dock changes nothing')
+                saved['persistent-apps'].append({'tile-data': {'file-data': {'_CFURLString': str(docked), '_CFURLStringType': 0}}})
+                behaviour['ignore_import'] = True; commands.clear()
+                try: _dock_unpin(docked)
+                except RuntimeError as error:
+                    check(commands == ['export', 'import', 'export', 'import'] and 'przywrócono' in str(error),
+                          'an unpin the Dock did not keep is undone and reported')
+                else: raise AssertionError('An ignored Dock change should be reported')
+                behaviour['ignore_import'] = False
+                for damaged in (b'not a property list', plistlib.dumps({'tilesize': 48.0})):
+                    behaviour['export'] = damaged; commands.clear()
+                    for action in (_dock_pin, _dock_unpin):
+                        try: action(docked)
+                        except RuntimeError: pass
+                        else: raise AssertionError('Unreadable Dock preferences should stop the change')
+                    check(commands == ['export', 'export'], 'unreadable or incomplete Dock preferences are never written back')
             executable = root / 'private runtime' / 'pythonw.exe'
             executable.parent.mkdir(); executable.write_bytes(b'fixture; never launched')
             script = root / "źródła & app's folder" / 'gitline.py'
@@ -18072,7 +18387,7 @@ def run_application():
             pass
     app = (None if testing else _EARLY_GUI_APP) or QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName(APP_ID); app.setApplicationDisplayName(APP_NAME); app.setOrganizationName(APP_ID)
-    if sys.platform == 'darwin' and QApplication.platformName() == 'cocoa':
+    if dock_available():
         # A script has no application bundle, so the Dock would keep the interpreter's icon.
         app.setWindowIcon(_dock_icon())
     if os.name == 'nt' and os.environ.get('QT_QPA_PLATFORM') == 'offscreen':
