@@ -27,7 +27,7 @@ Pierwsze uruchomienie samo przygotowuje prywatne środowisko, a jeśli trzeba �
 Gitline to desktopowy klient Git napisany w Pythonie i Qt, którego cała dystrybucja mieści się w **jednym pliku źródłowym**. Przekazujesz komuś `gitline.py`, ta osoba uruchamia go zainstalowanym Pythonem — i to wszystko. Skrypt sam:
 
 - tworzy prywatne środowisko wirtualne obok siebie i instaluje w nim zapięte hashami biblioteki (PySide6, keyring),
-- na Windows x64 pobiera zweryfikowaną sumą kontrolną kopię MinGit, jeśli w systemie nie ma Gita,
+- na Windows x64 pobiera zweryfikowaną sumą kontrolną kopię MinGit, jeśli w systemie nie ma Gita (na macOS korzysta z Gita z narzędzi wiersza poleceń Apple lub z Homebrew),
 - wyświetla złoty, renderowany programowo loader 3D, a potem przekazuje go głównemu oknu bez mrugnięcia ekranu.
 
 Nie modyfikuje systemu: nie dotyka `PATH`, globalnej konfiguracji Gita ani cudzych ustawień. Każda kopia pliku ma własne środowisko i własny `gitline.json`.
@@ -36,13 +36,15 @@ Nie modyfikuje systemu: nie dotyka `PATH`, globalnej konfiguracji Gita ani cudzy
 
 ## Szybki start
 
-**Wymagania:** Windows, 64‑bitowy CPython 3.10 – 3.14 oraz internet przy pierwszym uruchomieniu.
+**Wymagania:** Windows albo macOS 13+ (wsparcie wstępne), 64‑bitowy CPython 3.10 – 3.14 oraz internet przy pierwszym uruchomieniu.
 
 ```powershell
 python gitline.py                    # pierwszy start przygotuje wszystko sam
 python gitline.py C:\projekty\app    # od razu otwórz wskazane repozytorium
 python gitline.py --help             # pomoc bez instalowania czegokolwiek
 ```
+
+Na macOS polecenie to `python3 gitline.py`. Potrzebny jest Python z Tk (instalator z python.org albo Homebrew z pakietem `python-tk`) oraz Git: `xcode-select --install` albo Homebrew. Skróty, przypinanie do paska zadań i prywatna kopia Gita działają tylko w Windows.
 
 Przed instalacją bibliotek pojawia się okno wyboru źródła pakietów: **publiczne PyPI** albo **firmowe Artifactory** (hasło jest użyte wyłącznie do tej jednej instalacji i nigdzie nie jest zapisywane). To samo okno pokazuje postęp i zamyka się dopiero wtedy, gdy loader 3D narysuje pierwszą klatkę.
 
@@ -141,7 +143,7 @@ Konta GitHub, GitLab i firmowych serwerów łączysz raz — tokeny trafiają do
 └── .gitline/                ← dzienniki, prywatny MinGit (jeśli pobrany), ikony skrótów
 ```
 
-Tokeny kont **nigdy** nie lądują w tych plikach — mieszkają w systemowym magazynie poświadczeń (Windows Credential Manager przez `keyring`). Zwykłe uruchomienia ignorują odziedziczone zmienne środowiskowe innych kopii i nie importują cudzych ustawień.
+Tokeny kont **nigdy** nie lądują w tych plikach — mieszkają w systemowym magazynie poświadczeń (Windows Credential Manager albo pęk kluczy macOS, przez `keyring`). Zwykłe uruchomienia ignorują odziedziczone zmienne środowiskowe innych kopii i nie importują cudzych ustawień.
 
 <br>
 

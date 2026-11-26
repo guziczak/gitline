@@ -1,0 +1,59 @@
+name: check
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # Test modes never install anything: give them the same hash-locked
+      # packages that a first launch would install, written by gitline.py itself.
+      - name: Install the locked runtime
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          script = Path('gitline.py').resolve()
+          prelude = script.read_text(encoding='utf-8').split("\nif __name__ == '__main__':", 1)[0]
+          namespace = {'__name__': 'gitline_lock', '__file__': str(script)}
+          exec(compile(prelude, str(script), 'exec'), namespace)
+          target = Path(os.environ['RUNNER_TEMP']) / 'gitline-requirements.txt'
+          namespace['_write_locked_requirements'](target, namespace['_DEPENDENCIES'])
+          PY
+          python -m pip install --disable-pip-version-check --no-input --only-binary=:all: \
+            --require-hashes --requirement "$RUNNER_TEMP/gitline-requirements.txt"
+
+      - name: Regression tests
+        id: tests
+        run: python gitline.py --check --report "$RUNNER_TEMP/check-report.json"
+
+      # --check stops at its first failure; this names all of them.
+      - name: List every failing test
+        if: failure() && steps.tests.conclusion == 'failure'
+        run: python .github/scripts/selftests.py gitline.py

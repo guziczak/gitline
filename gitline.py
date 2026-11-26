@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 """Gitline — a single-file desktop Git client.
 
-Share only gitline.py. Windows and an installed 64-bit CPython 3.10–3.14 are required:
-``python gitline.py``. The first launch needs internet and automatically
-prepares its private environment; on Windows x64 it also downloads a verified
-private copy of Git if Git is missing. No manual pip commands, installer or
-administrator rights are needed. Each script copy owns gitline.json and a
+Share only gitline.py. Windows (or macOS 13+, early support) and an installed
+64-bit CPython 3.10–3.14 are required: ``python gitline.py``. The first launch
+needs internet and automatically prepares its private environment; on Windows
+x64 it also downloads a verified private copy of Git if Git is missing, while
+macOS uses the Git of Apple's command line tools or Homebrew. No manual pip
+commands, installer or administrator rights are needed. Each script copy owns gitline.json and a
 .gitline-venv-3.xx environment beside it; .gitline holds its logs, private Git and icons.
 Before setup, a standard-library Tk window lets you choose public PyPI or an
 internal Artifactory index. Its password is used only for that installation.
@@ -493,9 +494,25 @@ def _startup_event_api():
 
 
 class _StartupHandoff:
+    """One launch's readiness signal: a named event in Windows, a private FIFO elsewhere."""
     def __init__(self):
         import ctypes
         import uuid
+        self._handle = self._reader = self._directory = None
+        self._signalled = False
+        if os.name != 'nt':
+            import tempfile
+            # Only this user can enter the directory, and the kernel keeps the
+            # acknowledgement byte after the Qt child has closed its end.
+            try:
+                self._directory = tempfile.mkdtemp(prefix='gitline-startup-')
+                self.name = os.path.join(self._directory, 'ready')
+                os.mkfifo(self.name, 0o600)
+                self._reader = os.open(self.name, os.O_RDONLY | os.O_NONBLOCK)
+            except OSError as error:
+                self.close()
+                raise OSError(error.errno, 'Nie można przygotować przekazania okna aplikacji.') from None
+            return
         self._api = _startup_event_api()
         self.name = 'Local\\Gitline.Startup.' + uuid.uuid4().hex
         self._handle = self._api.CreateEventW(None, True, False, self.name)
@@ -503,6 +520,15 @@ class _StartupHandoff:
             raise OSError(ctypes.get_last_error(), 'Nie można przygotować przekazania okna aplikacji.')
 
     def ready(self):
+        if self._reader is not None:
+            if not self._signalled:
+                try:
+                    self._signalled = bool(os.read(self._reader, 1))
+                except BlockingIOError:
+                    pass  # The child holds the FIFO open and has not acknowledged yet.
+                except OSError:
+                    raise OSError('Nie można sprawdzić gotowości okna aplikacji.') from None
+            return self._signalled
         if not self._handle: return False
         result = self._api.WaitForSingleObject(self._handle, 0)
         if result not in (0, 258):
@@ -512,18 +538,51 @@ class _StartupHandoff:
     def close(self):
         handle, self._handle = self._handle, None
         if handle: self._api.CloseHandle(handle)
+        reader, self._reader = self._reader, None
+        directory, self._directory = self._directory, None
+        self._signalled = False
+        if reader is not None:
+            with contextlib.suppress(OSError): os.close(reader)
+        if directory is not None:
+            with contextlib.suppress(OSError): os.unlink(os.path.join(directory, 'ready'))
+            with contextlib.suppress(OSError): os.rmdir(directory)
 
 
 def _create_startup_handoff():
     return _StartupHandoff()
 
 
+def _notify_startup_fifo(name: str) -> bool:
+    """Outside Windows: one byte into the setup window's private FIFO, never a new file."""
+    import stat
+    directory, leaf = os.path.split(name)
+    if (not os.path.isabs(name) or leaf != 'ready'
+            or not os.path.basename(directory).startswith('gitline-startup-')):
+        return False
+    try:
+        # Without O_CREAT an expired or forged name cannot leave a marker file;
+        # a FIFO whose setup process already closed refuses the open.
+        descriptor = os.open(name, os.O_WRONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_NOCTTY)
+    except OSError:
+        return False
+    try:
+        status = os.fstat(descriptor)
+        return (stat.S_ISFIFO(status.st_mode) and status.st_uid == os.getuid()
+                and os.write(descriptor, b'1') == 1)
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
+
+
 def _notify_startup_visible() -> bool:
     """Acknowledge a painted golden splash to this launch's setup window."""
     name = os.environ.pop('GITLINE_STARTUP_EVENT', '')
+    if os.name != 'nt':
+        return _notify_startup_fifo(name)
     prefix = 'Local\\Gitline.Startup.'
     suffix = name.removeprefix(prefix)
-    if (os.name != 'nt' or not name.startswith(prefix) or len(suffix) != 32
+    if (not name.startswith(prefix) or len(suffix) != 32
             or any(character not in '0123456789abcdef' for character in suffix)):
         return False
     try:
@@ -748,9 +807,12 @@ def _bootstrap_source_window(tk, ttk, defaults, *, retained=False):
                                              ('start_menu', 'Menu Start')), start=1):
         option = ttk.Checkbutton(shortcuts, text=caption, variable=shortcut_vars[name], style='Setup.TCheckbutton')
         option.grid(row=0, column=column, sticky='w', padx=(0, 12))
-        if os.name != 'nt': option.state(['disabled'])
-    ttk.Label(body, text='Pasek zadań: po starcie kliknij „Przypnij” i potwierdź w Windows.',
-              style='SetupHint.TLabel', wraplength=660).grid(row=6, sticky='w', pady=(3, 0))
+    taskbar_hint = ttk.Label(body, text='Pasek zadań: po starcie kliknij „Przypnij” i potwierdź w Windows.',
+                             style='SetupHint.TLabel', wraplength=660)
+    taskbar_hint.grid(row=6, sticky='w', pady=(3, 0))
+    if os.name != 'nt':
+        # Desktop, Start menu and taskbar integration exist only in Windows.
+        shortcuts.grid_remove(); taskbar_hint.grid_remove()
     paths = ttk.Label(body, text=f'Konfiguracja: {_config_path()}\nŚrodowisko: {_RUNTIME_DIR}',
                       style='SetupHint.TLabel', wraplength=660, justify='left')
     paths.grid(row=7, sticky='w', pady=(12, 0))
@@ -1322,8 +1384,46 @@ def _extract_git(archive: Path, target: Path) -> None:
         raise RuntimeError("Pakiet Gita jest niekompletny.")
 
 
+_MACOS_GIT_PATHS = ('/usr/bin/git', '/usr/local/bin/git', '/opt/homebrew/bin/git')
+_MACOS_GIT_HINT = ('Gitline potrzebuje Gita. W Terminalu uruchom „xcode-select --install” '
+                   '(narzędzia wiersza poleceń Apple) albo zainstaluj Git z Homebrew, a następnie uruchom plik ponownie.')
+_APPLE_GIT_VERIFIED = False
+
+
+def _apple_git_stub_only(candidate) -> bool:
+    """macOS always ships /usr/bin/git; without developer tools it only opens an install prompt."""
+    global _APPLE_GIT_VERIFIED
+    if (sys.platform != 'darwin' or _APPLE_GIT_VERIFIED
+            or os.path.realpath(candidate) != os.path.realpath('/usr/bin/git')):
+        return False
+    try:
+        # xcode-select only prints the active developer directory; it never prompts.
+        result = subprocess.run(['/usr/bin/xcode-select', '-p'], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return False  # An unknown state leaves the report to Git itself.
+    developer = result.stdout.decode('utf-8', 'replace').strip()
+    _APPLE_GIT_VERIFIED = (result.returncode == 0 and bool(developer)
+                           and os.path.isfile(os.path.join(developer, 'usr', 'bin', 'git')))
+    return not _APPLE_GIT_VERIFIED
+
+
+def _macos_git():
+    """A Git that can actually run on this Mac, preferring the one on PATH."""
+    import shutil
+    for candidate in (shutil.which('git'), *_MACOS_GIT_PATHS):
+        if candidate and os.path.isfile(candidate) and not _apple_git_stub_only(candidate):
+            return candidate
+    return None
+
+
 def _bootstrap_git() -> None:
     """Install a private Git on Windows x64, never change PATH or system Git."""
+    if sys.platform == 'darwin':
+        # There is no private Git for macOS: require a working one before the interface starts.
+        if _macos_git() is None:
+            raise RuntimeError(_MACOS_GIT_HINT)
+        return
     if os.name != "nt":
         return
     import glob
@@ -1971,8 +2071,9 @@ def bootstrap(_source=None, *, _retained=False) -> None:
             f"Konfiguracja: {_config_path()}\n"
             f"Środowisko tej kopii: {_RUNTIME_DIR}\n"
             f"Dzienniki, prywatny Git i ikony: {APP_DATA}\n"
-            "Wymagany Windows, Python 3.10–3.14 (64-bit) i internet przy pierwszym uruchomieniu.\n"
+            "Wymagany Windows albo macOS 13+ (wsparcie wstępne), Python 3.10–3.14 (64-bit) i internet przy pierwszym uruchomieniu.\n"
             "Biblioteki i brakujący Git na Windows x64 są przygotowywane automatycznie.\n"
+            "Na macOS potrzebny jest Git z narzędzi wiersza poleceń Apple lub z Homebrew.\n"
             "Biblioteki: publiczne PyPI lub własne Artifactory — wybór przed instalacją.\n"
             "Okno przygotowania korzysta ze składnika Tcl/Tk dołączonego do Pythona.\n"
             "Każda kopia przygotowuje własne środowisko i ustawienia obok pliku.\n"
@@ -1980,8 +2081,8 @@ def bootstrap(_source=None, *, _retained=False) -> None:
         )
         raise SystemExit(0)
 
-    if sys.platform != 'win32':
-        _bootstrap_error(f'Ta wersja {APP_NAME} działa tylko w Windows. Nie przygotowano środowiska.')
+    if sys.platform not in ('win32', 'darwin'):
+        _bootstrap_error(f'Ta wersja {APP_NAME} działa tylko w Windows i macOS. Nie przygotowano środowiska.')
         raise SystemExit(1)
 
     if not (3, 10) <= sys.version_info[:2] < (3, 15):
@@ -2848,8 +2949,10 @@ def discover_git():
             candidates.append(os.path.join(base, "Git", "cmd", "git.exe"))
     candidates.extend([r"C:\Program Files\Git\cmd\git.exe", "/usr/bin/git", "/usr/local/bin/git", "/opt/homebrew/bin/git"])
     for candidate in candidates:
-        if os.path.isfile(candidate):
+        if os.path.isfile(candidate) and not _apple_git_stub_only(candidate):
             return os.path.abspath(candidate)
+    if sys.platform == 'darwin':
+        raise GitError(_MACOS_GIT_HINT)
     raise GitError("Nie znaleziono Gita. Zainstaluj Git ze strony https://git-scm.com/downloads lub GitHub Desktop, a następnie uruchom aplikację ponownie.")
 
 
@@ -6478,7 +6581,10 @@ class AccountStore:
 def credential_git_options(script_path=None):
     """Per-command Git options; call before the Git subcommand. No global config writes."""
     script = str(AuthPath(script_path or __file__).resolve()).replace("\\", "/")
-    python_path = AuthPath(auth_sys.executable).resolve()
+    # A virtual environment is found through its interpreter link (the default
+    # on macOS). Following that link would start a Python without the libraries.
+    python_path = AuthPath(auth_sys.executable)
+    python_path = python_path.parent.resolve() / python_path.name
     if auth_os.name == "nt" and python_path.name.lower() == "pythonw.exe":
         # Git requires real protocol streams even if the GUI was double-clicked.
         python_path = python_path.with_name("python.exe")
@@ -7170,6 +7276,18 @@ def auth_self_test():
             assert "pythonw.exe" not in helper.lower() and "python.exe" in helper.lower()
         finally:
             auth_sys.executable = original_python
+    else:
+        # Outside Windows a virtual environment is only its interpreter link.
+        original_python = auth_sys.executable
+        with auth_tempfile.TemporaryDirectory(prefix="gitline-auth-test-") as directory:
+            link = AuthPath(directory).resolve() / "python"
+            auth_os.symlink(original_python, link)
+            try:
+                auth_sys.executable = str(link)
+                helper = credential_git_options("folder with spaces/gitline.py")[3]
+                assert auth_shlex.quote(str(link)) in helper, "Credential helper left its virtual environment"
+            finally:
+                auth_sys.executable = original_python
     for bad in ("http://github.com", "https://a:b@github.com", "https://github.com/path", "https://github.com?token=secret",
                 "github.com\npassword=secret", "https://github.com\\@evil.test", "https://-host.test", "https://github.com:0"):
         try:
@@ -14336,7 +14454,12 @@ def taskbar_ui_self_test():
                                   and _config_section('bootstrap')['taskbar_pending'] and not window.shortcut_button.isEnabled(),
                                   name + ': pending request stays owned without duplicate requests')
                             if name == 'dismiss': window.dismiss_taskbar_pin()
-                            elif name == 'close': window.close()
+                            elif name == 'close':
+                                window.close()
+                                # Shutdown yields once so its closing view paints before any cleanup.
+                                deadline = time.monotonic() + 5
+                                while not request.closed and time.monotonic() < deadline:
+                                    app.processEvents(); time.sleep(.005)
                             else:
                                 request.result = result
                                 window._poll_taskbar_pin()
@@ -14686,7 +14809,7 @@ def copy_isolation_self_test():
                     exited(namespace['bootstrap'])
                 check(not runtime.exists() and not namespace['_config_path']().exists(),
                       name + ' asks for setup before creating a runtime or importing old configuration')
-                runtime_python = runtime / 'Scripts' / 'python.exe'
+                runtime_python = runtime / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
                 runtime_python.parent.mkdir(parents=True)
                 runtime_python.write_text('fixture interpreter; never executed', encoding='utf-8')
                 (runtime / '.gitline-ready.json').write_text(json.dumps({
@@ -14935,7 +15058,7 @@ def bootstrap_self_test():
         log_path = root / 'bootstrap.log'
         with patch.dict(globals(), APP_DATA=root, _SCRIPT_DIR=root, _RUNTIME_DIR=runtime, _BOOTSTRAP_LOG=log_path), \
                 patch.object(platform, 'machine', return_value='AMD64'):
-            for unsupported in ('linux', 'darwin'):
+            for unsupported in ('linux', 'freebsd14'):
                 message = Mock(); untouched = Mock(side_effect=AssertionError('Unsupported startup touched runtime setup'))
                 with patch.object(sys, 'platform', unsupported), patch.object(sys, 'argv', ['gitline.py', '--setup']), \
                         patch.dict(globals(), _bootstrap_error=message, _choose_bootstrap_source=untouched,
@@ -14945,9 +15068,9 @@ def bootstrap_self_test():
                         bootstrap()
                         raise AssertionError('Unsupported startup did not exit')
                     except SystemExit as error:
-                        check(error.code == 1 and 'tylko w Windows' in message.call_args.args[0]
+                        check(error.code == 1 and 'tylko w Windows i macOS' in message.call_args.args[0]
                               and not untouched.called and not runtime.exists(),
-                              unsupported + ' startup explains Windows support before any runtime preparation')
+                              unsupported + ' startup explains Windows and macOS support before any runtime preparation')
                 notice = Mock()
                 with patch.object(sys, 'platform', unsupported), patch.object(sys, 'argv', ['gitline.py', '--help']), \
                         patch.dict(globals(), _bootstrap_notice=notice, _bootstrap_error=untouched):
@@ -14957,6 +15080,41 @@ def bootstrap_self_test():
                     except SystemExit as error:
                         check(error.code == 0 and 'Windows' in notice.call_args.args[0],
                               unsupported + ' retains dependency-free help without attempting startup')
+            reviewed = Mock(side_effect=SystemExit(0))
+            with patch.object(sys, 'platform', 'darwin'), patch.object(sys, 'argv', ['gitline.py', '--setup']), \
+                    patch.dict(globals(), _choose_bootstrap_source=reviewed,
+                               _bootstrap_error=Mock(side_effect=AssertionError('macOS startup was refused'))), \
+                    patch.object(subprocess, 'run', side_effect=AssertionError('macOS startup launched a process before review')):
+                try:
+                    bootstrap()
+                    raise AssertionError('macOS setup did not reach the source review')
+                except SystemExit as error:
+                    check(error.code == 0 and reviewed.call_count == 1 and not runtime.exists(),
+                          'macOS passes the platform gate and reviews its package source before preparing a runtime')
+            developer = str(root / 'Developer')
+            probes, present = [], {'/usr/bin/git'}
+            def developer_directory(command, **kwargs):
+                probes.append(command)
+                return subprocess.CompletedProcess(command, 0, stdout=(developer + '\n').encode('utf-8'))
+            with patch.object(sys, 'platform', 'darwin'), patch.object(shutil, 'which', return_value=None), \
+                    patch.dict(globals(), _APPLE_GIT_VERIFIED=False), \
+                    patch.object(os.path, 'isfile', side_effect=lambda path: path in present), \
+                    patch.object(subprocess, 'run', side_effect=developer_directory):
+                check(_apple_git_stub_only('/usr/bin/git') and not _apple_git_stub_only('/opt/homebrew/bin/git')
+                      and probes == [['/usr/bin/xcode-select', '-p']],
+                      'macOS recognizes /usr/bin/git without developer tools by asking only xcode-select')
+                for find in (_bootstrap_git, discover_git):
+                    try:
+                        find()
+                        raise AssertionError('A Mac holding only the Git stub appeared to have Git')
+                    except RuntimeError as error:
+                        check('xcode-select --install' in str(error),
+                              find.__name__ + ' tells a Mac holding only the Git stub how to install Git')
+                present.add(os.path.join(developer, 'usr', 'bin', 'git'))
+                _bootstrap_git(); verified = len(probes)
+                check(_macos_git() == '/usr/bin/git' and discover_git() == os.path.abspath('/usr/bin/git')
+                      and not _apple_git_stub_only('/usr/bin/git') and len(probes) == verified,
+                      'installed developer tools make /usr/bin/git usable and are verified once per process')
             for dependencies_ready in (True, False):
                 probe = Mock(return_value=dependencies_ready)
                 error_message = Mock()
@@ -15785,7 +15943,6 @@ def commit_date_self_test():
 def startup_handoff_self_test():
     """Acknowledge startup across real processes without opening any windows."""
     from unittest.mock import patch
-    if os.name != 'nt': return 'Startup handoff self-test skipped outside Windows.'
     checks = []
     def check(condition, label):
         if not condition: raise AssertionError(label)
@@ -15794,19 +15951,37 @@ def startup_handoff_self_test():
     try:
         check(first.name != second.name and not first.ready() and not second.ready(),
               'each launch starts with an independent unsignalled handoff')
-        for marker in ('', 'Local\\Other.Event', 'Local\\Gitline.Startup.' + 'g' * 32,
-                       'Local\\Gitline.Startup.' + '0' * 32):
+        if os.name == 'nt':
+            markers = ('', 'Local\\Other.Event', 'Local\\Gitline.Startup.' + 'g' * 32,
+                       'Local\\Gitline.Startup.' + '0' * 32)
+        else:
+            # A missing name, an ordinary file and a FIFO outside a handoff directory.
+            private = Path(first.name).parent
+            ordinary = Path(tempfile.mkdtemp(prefix='gitline-startup-')); (ordinary / 'ready').write_bytes(b'')
+            foreign = Path(tempfile.mkdtemp(prefix='gitline-other-')); os.mkfifo(foreign / 'ready', 0o600)
+            foreign_reader = os.open(foreign / 'ready', os.O_RDONLY | os.O_NONBLOCK)
+            markers = ('', 'gitline-startup-relative/ready', str(private / 'missing'),
+                       str(private.with_name('gitline-startup-missing') / 'ready'),
+                       str(ordinary / 'ready'), str(foreign / 'ready'))
+        for marker in markers:
             with patch.dict(os.environ, GITLINE_STARTUP_EVENT=marker):
                 check(not _notify_startup_visible() and 'GITLINE_STARTUP_EVENT' not in os.environ
                       and not first.ready() and not second.ready(),
                       'invalid or expired startup marker cannot acknowledge another window: ' + (marker or '(empty)'))
-        # Load only the two production stdlib notification helpers in the child.
+        if os.name != 'nt':
+            try:
+                check(not (private / 'missing').exists() and (ordinary / 'ready').read_bytes() == b''
+                      and not os.read(foreign_reader, 1) and not private.with_name('gitline-startup-missing').exists(),
+                      'rejected startup markers create no file and write into nothing')
+            finally:
+                os.close(foreign_reader); shutil.rmtree(foreign); shutil.rmtree(ordinary)
+        # Load only the production stdlib notification helpers in the child.
         # The test therefore never imports Qt, prepares a runtime or touches config.
         child = (
             "import ast,os,sys; from pathlib import Path; "
             "tree=ast.parse(Path(sys.argv[1]).read_text(encoding='utf-8-sig')); "
             "nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and "
-            "n.name in ('_startup_event_api','_notify_startup_visible')]; "
+            "n.name in ('_startup_event_api','_notify_startup_fifo','_notify_startup_visible')]; "
             "exec(compile(ast.Module(body=nodes,type_ignores=[]),sys.argv[1],'exec')); "
             "sys.exit(0 if _notify_startup_visible() and 'GITLINE_STARTUP_EVENT' not in os.environ else 2)"
         )
@@ -15817,7 +15992,8 @@ def startup_handoff_self_test():
         check(result.returncode == 0 and first.ready() and not second.ready(),
               'a real child acknowledges only its parent after visibility notification')
         first.close(); first.close()
-        check(not first.ready() and not second.ready(), 'handoff cleanup is idempotent and keeps other launches independent')
+        check(not first.ready() and not second.ready() and (os.name == 'nt' or not Path(first.name).parent.exists()),
+              'handoff cleanup is idempotent, leaves nothing behind and keeps other launches independent')
         with patch.dict(os.environ, GITLINE_STARTUP_EVENT=first.name):
             check(not _notify_startup_visible(), 'a late notification cannot revive a closed parent handoff')
         return f'Startup handoff self-test passed: {len(checks)} checks.'
