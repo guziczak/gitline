@@ -44,7 +44,7 @@ python gitline.py C:\projekty\app    # od razu otwórz wskazane repozytorium
 python gitline.py --help             # pomoc bez instalowania czegokolwiek
 ```
 
-Na macOS polecenie to `python3 gitline.py`. Potrzebny jest Python z Tk (instalator z python.org albo Homebrew z pakietem `python-tk`) oraz Git: `xcode-select --install` albo Homebrew. Skróty, przypinanie do paska zadań i prywatna kopia Gita działają tylko w Windows.
+Na macOS polecenie to `python3 gitline.py`. Potrzebny jest Python z Tk (instalator z python.org albo Homebrew z pakietem `python-tk`) oraz Git z narzędzi wiersza poleceń Apple albo z Homebrew — jeśli go nie ma, Gitline zapyta, czy uruchomić instalator Apple. Skróty, przypinanie do paska zadań i prywatna kopia Gita działają tylko w Windows.
 
 Przed instalacją bibliotek pojawia się okno wyboru źródła pakietów: **publiczne PyPI** albo **firmowe Artifactory** (hasło jest użyte wyłącznie do tej jednej instalacji i nigdzie nie jest zapisywane). To samo okno pokazuje postęp i zamyka się dopiero wtedy, gdy loader 3D narysuje pierwszą klatkę.
 

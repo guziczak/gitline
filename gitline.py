@@ -287,6 +287,24 @@ def _bootstrap_progress(stage='', detail='', current=None, total=None):
                    'current': current, 'total': total})
 
 
+def _bootstrap_confirm(question: str) -> bool:
+    """Ask in the open setup window (only its thread may call Tk), otherwise in a terminal."""
+    events = _BOOTSTRAP_PROGRESS_QUEUE
+    if events is not None:
+        import queue
+        answer = queue.Queue(maxsize=1)
+        events.put({'kind': 'question', 'text': question, 'answer': answer})
+        while True:
+            _bootstrap_check_cancelled()
+            try: return answer.get(timeout=.1)
+            except queue.Empty: pass
+    try:
+        if sys.stdin is None or not sys.stdin.isatty(): return False
+        return input(question + ' [t/N]: ').strip().lower() in ('t', 'tak', 'y', 'yes')
+    except (OSError, EOFError, ValueError):
+        return False  # Nobody to ask is not consent.
+
+
 def _normal_gui_start() -> bool:
     # CLI modes and credential protocols keep their original streams even when
     # launched by a GUI process that carries our relaunch environment marker.
@@ -941,6 +959,13 @@ class _BootstrapSetupSession:
                         self.bar.configure(mode='indeterminate'); self.bar.start(12)
                     if event.get('stage') == 'Uruchamianie Gitline':
                         self.phase = 'handoff'; self.close_button.configure(text='Zamknij przygotowanie')
+                elif kind == 'question':
+                    reply = False  # A dialog that cannot open is not consent.
+                    if not self.cancel_event.is_set():
+                        with contextlib.suppress(Exception):
+                            from tkinter import messagebox
+                            reply = bool(messagebox.askyesno(APP_NAME, event['text'], parent=self.root))
+                    event['answer'].put(reply)
                 elif kind == 'done':
                     self.bar.stop()
                     if event.get('outcome') == 'handoff':
@@ -1001,7 +1026,9 @@ def _choose_bootstrap_source(*, prepare=None):
         import tkinter as tk
         from tkinter import ttk
     except ImportError as exc:
-        raise RuntimeError("Okno przygotowania wymaga Tkintera. W instalatorze Pythona włącz składnik Tcl/Tk (tkinter).") from exc
+        hint = ("Zainstaluj Pythona z python.org albo dodaj pakiet python-tk z Homebrew." if sys.platform == 'darwin'
+                else "W instalatorze Pythona włącz składnik Tcl/Tk (tkinter).")
+        raise RuntimeError("Okno przygotowania wymaga Tkintera. " + hint) from exc
     try:
         root, result, _controls = _bootstrap_source_window(tk, ttk, _bootstrap_source_defaults(), retained=prepare is not None)
         session = _BootstrapSetupSession(root, result, _controls, ttk, prepare) if prepare is not None else None
@@ -1417,12 +1444,36 @@ def _macos_git():
     return None
 
 
+def _offer_apple_git() -> None:
+    """With consent, open Apple's own installer and wait; Gitline downloads no Git for macOS itself."""
+    if not _bootstrap_confirm('Na tym Macu nie ma Gita. Zainstalować narzędzia wiersza poleceń Apple? '
+                              'Otworzy się instalator systemowy, a pobieranie potrwa kilka minut.'):
+        raise RuntimeError(_MACOS_GIT_HINT)
+    waiting = 'Dokończ instalację w oknie Apple. Gitline ruszy dalej, gdy narzędzia będą gotowe.'
+    _bootstrap_progress(stage='Instalowanie Gita', detail=waiting)
+    try:
+        requested = subprocess.run(['/usr/bin/xcode-select', '--install'], stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        raise RuntimeError(_MACOS_GIT_HINT) from None
+    if requested.returncode:
+        raise RuntimeError(_MACOS_GIT_HINT)
+    _bootstrap_notice(f'{APP_NAME}: czekam na instalator Apple. {waiting}')
+    deadline = time.monotonic() + 3600
+    while _macos_git() is None:
+        _bootstrap_check_cancelled()
+        if time.monotonic() >= deadline:
+            raise RuntimeError(_MACOS_GIT_HINT)
+        _bootstrap_progress(stage='Instalowanie Gita', detail=waiting)
+        time.sleep(2)
+
+
 def _bootstrap_git() -> None:
     """Install a private Git on Windows x64, never change PATH or system Git."""
     if sys.platform == 'darwin':
-        # There is no private Git for macOS: require a working one before the interface starts.
+        # There is no private Git for macOS: have a working one before the interface starts.
         if _macos_git() is None:
-            raise RuntimeError(_MACOS_GIT_HINT)
+            _offer_apple_git()
         return
     if os.name != "nt":
         return
@@ -15091,15 +15142,22 @@ def bootstrap_self_test():
                 except SystemExit as error:
                     check(error.code == 0 and reviewed.call_count == 1 and not runtime.exists(),
                           'macOS passes the platform gate and reviews its package source before preparing a runtime')
-            developer = str(root / 'Developer')
-            probes, present = [], {'/usr/bin/git'}
-            def developer_directory(command, **kwargs):
+            developer = str(root / 'Developer'); install = ['/usr/bin/xcode-select', '--install']
+            probes, present, downloading, stages = [], {'/usr/bin/git'}, [], []
+            def xcode_select(command, **kwargs):
                 probes.append(command)
+                if command == install: downloading.extend(range(2))  # Two more probes pass before the tools appear.
+                elif downloading:
+                    downloading.pop()
+                    if not downloading: present.add(os.path.join(developer, 'usr', 'bin', 'git'))
                 return subprocess.CompletedProcess(command, 0, stdout=(developer + '\n').encode('utf-8'))
+            consent = Mock(return_value=False)
             with patch.object(sys, 'platform', 'darwin'), patch.object(shutil, 'which', return_value=None), \
-                    patch.dict(globals(), _APPLE_GIT_VERIFIED=False), \
+                    patch.dict(globals(), _APPLE_GIT_VERIFIED=False, _bootstrap_confirm=consent,
+                               _bootstrap_notice=lambda message: None,
+                               _bootstrap_progress=lambda stage='', detail='', **unused: stages.append(stage)), \
                     patch.object(os.path, 'isfile', side_effect=lambda path: path in present), \
-                    patch.object(subprocess, 'run', side_effect=developer_directory):
+                    patch.object(time, 'sleep'), patch.object(subprocess, 'run', side_effect=xcode_select):
                 check(_apple_git_stub_only('/usr/bin/git') and not _apple_git_stub_only('/opt/homebrew/bin/git')
                       and probes == [['/usr/bin/xcode-select', '-p']],
                       'macOS recognizes /usr/bin/git without developer tools by asking only xcode-select')
@@ -15108,13 +15166,26 @@ def bootstrap_self_test():
                         find()
                         raise AssertionError('A Mac holding only the Git stub appeared to have Git')
                     except RuntimeError as error:
-                        check('xcode-select --install' in str(error),
-                              find.__name__ + ' tells a Mac holding only the Git stub how to install Git')
-                present.add(os.path.join(developer, 'usr', 'bin', 'git'))
+                        check('xcode-select --install' in str(error) and install not in probes,
+                              find.__name__ + ' explains the missing Git and starts no installer without consent')
+                check(consent.call_count == 1, 'only setup asks whether to install; the running application never does')
+                consent.return_value = True
                 _bootstrap_git(); verified = len(probes)
+                check(probes.count(install) == 1 and consent.call_count == 2 and 'Instalowanie Gita' in stages,
+                      'with consent setup opens the Apple installer once and waits until Git works')
                 check(_macos_git() == '/usr/bin/git' and discover_git() == os.path.abspath('/usr/bin/git')
                       and not _apple_git_stub_only('/usr/bin/git') and len(probes) == verified,
                       'installed developer tools make /usr/bin/git usable and are verified once per process')
+            import queue
+            questions, replies = queue.Queue(), []
+            with patch.dict(globals(), _BOOTSTRAP_PROGRESS_QUEUE=questions):
+                asker = threading.Thread(target=lambda: replies.append(_bootstrap_confirm('Synthetic question?')))
+                asker.start(); asked = questions.get(timeout=5); asked['answer'].put(True); asker.join(5)
+            check(replies == [True] and asked['kind'] == 'question' and asked['text'] == 'Synthetic question?',
+                  'a setup worker asks through the window that owns Tk and waits for its answer')
+            with patch.object(sys, 'stdin', None):
+                check(not _bootstrap_confirm('Synthetic question?'),
+                      'without a setup window or a terminal nothing counts as consent')
             for dependencies_ready in (True, False):
                 probe = Mock(return_value=dependencies_ready)
                 error_message = Mock()
